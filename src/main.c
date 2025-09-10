@@ -38,7 +38,7 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    res = mediaplayer_load(&handle, argv[1]);
+    res = mediaplayer_play(&handle, argv[1]);
     if (!res.ok) {
       fprintf(stderr, "Error: %s\n", res.error_string);
       return 1;
