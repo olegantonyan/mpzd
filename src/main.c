@@ -1,4 +1,5 @@
 #include "mediaplayer/mediaplayer.h"
+#include "rpc/server.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +27,20 @@ void enable_raw_mode() {
 }
 
 int main(int argc, char **argv) {
+  ServerHandle_t h;
+  ServerResult_t r = server_init(&h, 6600);
+  if (!r.ok) {
+    puts(r.error_string);
+    return 1;
+  }
+
+  while (1) {
+    h.poll_func(&h);
+  }
+
+
+
+
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <audio-file>\n", argv[0]);
         return 1;

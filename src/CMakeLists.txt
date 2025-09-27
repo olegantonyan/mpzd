@@ -6,6 +6,7 @@ pkg_check_modules(MPV REQUIRED mpv)
 set(PROJECT_SOURCES
   main.c
   mediaplayer/mediaplayer.c
+  rpc/server.c
 )
 
 add_executable(${CMAKE_PROJECT_NAME} ${PROJECT_SOURCES})
