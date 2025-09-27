@@ -27,12 +27,12 @@ void enable_raw_mode() {
     atexit(disable_raw_mode);
 }
 
-void cb(int fd, const void *recv, int recv_size, void **send_buffer, int *send_bytes) {
-  printf("received: %s from %d\n", recv, fd);
+void cb(int fd, void *buffer, int buffer_size, int recv_size, int *send_bytes) {
+  printf("received: %s from %d\n", buffer, fd);
 
-  static const char *str = "this is response\n";
-  *send_buffer = (void *)str;
-  *send_bytes = strlen(str);
+  //memset(buffer, sizeof(buffer), 0);
+  snprintf(buffer, buffer_size, "response to you %d", fd);
+  *send_bytes = strlen(buffer);
 }
 
 int main(int argc, char **argv) {

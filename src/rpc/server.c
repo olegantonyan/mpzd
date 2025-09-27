@@ -160,11 +160,10 @@ void handle_client_data(const ServerHandle_t *handle, int client_fd) {
 
     if (bytes_read > 0) {
       int bytes_to_send;
-      void *send_buffer;
-      handle->callback(client_fd, buffer, bytes_read, &send_buffer, &bytes_to_send);
+      handle->callback(client_fd, buffer, sizeof(buffer), bytes_read, &bytes_to_send);
 
       if (bytes_to_send > 0) {
-        send(client_fd, send_buffer, bytes_to_send, 0);
+        send(client_fd, buffer, bytes_to_send, 0);
       }
     } else if (bytes_read == 0) {
       epoll_ctl(handle->epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
