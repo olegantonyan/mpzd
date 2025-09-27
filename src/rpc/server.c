@@ -19,7 +19,7 @@ static int set_nonblocking(int fd);
 static void handle_client_data(const ServerHandle_t *handle, int client_fd);
 static void handle_new_connection(const ServerHandle_t *handle);
 
-ServerResult_t server_init(ServerHandle_t *out_handle, int port) {
+ServerResult_t server_init(ServerHandle_t *out_handle, int port, ServerCallbackFunction_t callback) {
   ServerResult_t result = { .ok = true, .error_string = NULL };
 
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -86,6 +86,7 @@ ServerResult_t server_init(ServerHandle_t *out_handle, int port) {
   out_handle->epoll_fd = epoll_fd;
   out_handle->server_fd = server_fd;
   out_handle->poll_func = (ServerResult_t (*)(const void *))server_poll;
+  out_handle->callback = callback;
 
   return result;
 }
@@ -151,24 +152,24 @@ void handle_new_connection(const ServerHandle_t *handle) {
 }
 
 void handle_client_data(const ServerHandle_t *handle, int client_fd) {
-  char buffer[32768] = { 0 };
+  char buffer[100000] = { 0 };
   ssize_t bytes_read;
 
   while (true) {
-    bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+    ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
     if (bytes_read > 0) {
-      printf("Received from client %d: %s", client_fd, buffer);
+      int bytes_to_send;
+      void *send_buffer;
+      handle->callback(client_fd, buffer, bytes_read, &send_buffer, &bytes_to_send);
 
-      const char* response = "Server received your message\n";
-      send(client_fd, response, strlen(response), 0);
-
+      if (bytes_to_send > 0) {
+        send(client_fd, send_buffer, bytes_to_send, 0);
+      }
     } else if (bytes_read == 0) {
-      printf("Client %d disconnected\n", client_fd);
       epoll_ctl(handle->epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
       close(client_fd);
       break;
-
     } else {
       if (errno != EAGAIN && errno != EWOULDBLOCK) {
         //perror("recv");

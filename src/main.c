@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdbool.h>
+#include <string.h>
 
 struct termios orig_termios;
 
@@ -26,9 +27,17 @@ void enable_raw_mode() {
     atexit(disable_raw_mode);
 }
 
+void cb(int fd, const void *recv, int recv_size, void **send_buffer, int *send_bytes) {
+  printf("received: %s from %d\n", recv, fd);
+
+  static const char *str = "this is response\n";
+  *send_buffer = (void *)str;
+  *send_bytes = strlen(str);
+}
+
 int main(int argc, char **argv) {
   ServerHandle_t h;
-  ServerResult_t r = server_init(&h, 6600);
+  ServerResult_t r = server_init(&h, 6600, cb);
   if (!r.ok) {
     puts(r.error_string);
     return 1;
