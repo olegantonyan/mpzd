@@ -27,19 +27,18 @@ void enable_raw_mode() {
     atexit(disable_raw_mode);
 }
 
-void cb(int fd, void *buffer, int buffer_size, int recv_size, int *send_bytes) {
+int cb(int fd, void *buffer, int buffer_size, int recv_size) {
   printf("received: %s from %d\n", buffer, fd);
 
   //memset(buffer, sizeof(buffer), 0);
   snprintf(buffer, buffer_size, "response to you %d", fd);
-  *send_bytes = strlen(buffer);
+  return strlen(buffer);
 }
 
 int main(int argc, char **argv) {
   ServerHandle_t h;
-  ServerResult_t r = server_init(&h, 6600, cb);
-  if (!r.ok) {
-    puts(r.error_string);
+  bool r = server_init(&h, 6600, cb);
+  if (!r) {
     return 1;
   }
 
