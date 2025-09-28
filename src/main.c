@@ -27,7 +27,7 @@ void enable_raw_mode() {
     atexit(disable_raw_mode);
 }
 
-int cb(int fd, void *buffer, int buffer_size, int recv_size) {
+ssize_t cb(int fd, void *buffer, ssize_t buffer_size, ssize_t recv_size) {
   printf("received: %s from %d\n", buffer, fd);
 
   //memset(buffer, sizeof(buffer), 0);
@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
   }
 
   while (1) {
-    h.poll_func(&h);
+    server_poll(&h);
   }
 
 

@@ -13,22 +13,20 @@
 
 #define MAX_EVENTS 64
 
-static const char* get_last_error();
-static bool server_poll(const ServerHandle_t *handle);
 static bool set_nonblocking(int fd);
 static void handle_client_data(const ServerHandle_t *handle, int client_fd);
 static void handle_new_connection(const ServerHandle_t *handle);
 
-bool server_init(ServerHandle_t *out_handle, int port, ServerCallbackFunction_t callback) {
+bool server_init(ServerHandle_t *out_handle, unsigned short port, ServerCallbackFunction_t callback) {
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd == 0) {
-    perror("socket");
+    perror("socket(AF_INET, SOCK_STREAM, 0)");
     return false;
   }
 
   int opt = 1;
   if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
-    perror("setsockopt");
+    perror("setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))");
     close(server_fd);
     return false;
   }
@@ -43,20 +41,20 @@ bool server_init(ServerHandle_t *out_handle, int port, ServerCallbackFunction_t 
   address.sin_addr.s_addr = INADDR_ANY;
   address.sin_port = htons(port);
   if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-    perror("bind");
+    perror("bind(server_fd, (struct sockaddr *)&address, sizeof(address)");
     close(server_fd);
     return false;
   }
 
   if (listen(server_fd, SOMAXCONN) < 0) {
-    perror("listen");
+    perror("listen(server_fd, SOMAXCONN)");
     close(server_fd);
     return false;
   }
 
   int epoll_fd = epoll_create1(0);
   if (epoll_fd == -1) {
-    perror("epoll_create1");
+    perror("epoll_create1(0)");
     close(server_fd);
     close(epoll_fd);
     return false;
@@ -66,8 +64,8 @@ bool server_init(ServerHandle_t *out_handle, int port, ServerCallbackFunction_t 
   event.events = EPOLLIN;
   event.data.fd = server_fd;
 
-  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
-    perror("epoll_ctl");
+  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) < 0) {
+    perror("epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event)");
     close(server_fd);
     close(epoll_fd);
     return false;
@@ -75,32 +73,17 @@ bool server_init(ServerHandle_t *out_handle, int port, ServerCallbackFunction_t 
 
   out_handle->epoll_fd = epoll_fd;
   out_handle->server_fd = server_fd;
-  out_handle->poll_func = (bool (*)(const void *))server_poll;
   out_handle->callback = callback;
 
   return true;
 }
 
-bool set_nonblocking(int fd) {
-  int flags = fcntl(fd, F_GETFL, 0);
-  if (flags == -1) {
-    perror("fcntl(fd, F_GETFL, 0)");
-    return false;
-  }
-
-  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-    perror("fcntl(fd, F_SETFL, flags | O_NONBLOCK)");
-    return false;
-  }
-  return true;
-}
-
-static bool server_poll(const ServerHandle_t *handle) {
+bool server_poll(const ServerHandle_t *handle) {
   struct epoll_event events[MAX_EVENTS];
 
   int nfds = epoll_wait(handle->epoll_fd, events, MAX_EVENTS, -1);
   if (nfds == -1) {
-    perror("epoll_wait");
+    perror("epoll_wait(handle->epoll_fd, events, MAX_EVENTS, -1)");
     return false;
   }
 
@@ -115,7 +98,21 @@ static bool server_poll(const ServerHandle_t *handle) {
   return true;
 }
 
-void handle_new_connection(const ServerHandle_t *handle) {
+static bool set_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0) {
+    perror("fcntl(fd, F_GETFL, 0)");
+    return false;
+  }
+
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    perror("fcntl(fd, F_SETFL, flags | O_NONBLOCK)");
+    return false;
+  }
+  return true;
+}
+
+static void handle_new_connection(const ServerHandle_t *handle) {
   struct sockaddr_in client_addr;
   socklen_t client_len = sizeof(client_addr);
   int client_fd;
@@ -130,20 +127,20 @@ void handle_new_connection(const ServerHandle_t *handle) {
     event.events = EPOLLIN | EPOLLET;
     event.data.fd = client_fd;
 
-    if (epoll_ctl(handle->epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
-      perror("epoll_ctl");
+    if (epoll_ctl(handle->epoll_fd, EPOLL_CTL_ADD, client_fd, &event) < 0) {
+      perror("epoll_ctl(handle->epoll_fd, EPOLL_CTL_ADD, client_fd, &event)");
       close(client_fd);
       continue;
     }
   }
 
-  if (client_fd == -1 && (errno != EAGAIN && errno != EWOULDBLOCK)) {
+  if (client_fd < 0 && (errno != EAGAIN && errno != EWOULDBLOCK)) {
     perror("accept");
   }
 }
 
-void handle_client_data(const ServerHandle_t *handle, int client_fd) {
-  char buffer[50000] = { 0 };
+static void handle_client_data(const ServerHandle_t *handle, int client_fd) {
+  unsigned char buffer[50000] = { 0 };
   ssize_t bytes_read;
 
   while (true) {
@@ -154,7 +151,8 @@ void handle_client_data(const ServerHandle_t *handle, int client_fd) {
 
       if (bytes_to_send > 0) {
         if (send(client_fd, buffer, bytes_to_send, 0) < 0) {
-          perror("send");
+          perror("send(client_fd, buffer, bytes_to_send, 0)");
+          break;
         }
       } else {
         epoll_ctl(handle->epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
@@ -167,7 +165,7 @@ void handle_client_data(const ServerHandle_t *handle, int client_fd) {
       break;
     } else {
       if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        perror("recv");
+        perror("recv(client_fd, buffer, sizeof(buffer) - 1, 0)");
         epoll_ctl(handle->epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
         close(client_fd);
       }
