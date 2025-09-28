@@ -155,8 +155,8 @@ static void handle_client_data(const ServerHandle_t *handle, int client_fd) {
           break;
         }
       } else {
-        epoll_ctl(handle->epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
-        close(client_fd);
+        // epoll_ctl(handle->epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+        // close(client_fd);
         break;
       }
     } else if (bytes_read == 0) {
