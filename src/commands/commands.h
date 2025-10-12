@@ -6,9 +6,9 @@
 #include <stdbool.h>
 
 typedef struct {
-  MediaPlayerHandle_t mp;
+  MediaPlayerHandle_t *mp;
 } CommandsContext_t;
 
-void commands_init(CommandsContext_t *context);
+void commands_init(const CommandsContext_t *context);
 
 #endif

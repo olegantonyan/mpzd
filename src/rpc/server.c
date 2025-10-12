@@ -75,6 +75,7 @@ bool server_init(ServerHandle_t *out_handle, unsigned short port, ServerCallback
   out_handle->epoll_fd = epoll_fd;
   out_handle->server_fd = server_fd;
   out_handle->callback = callback;
+  out_handle->port = port;
 
   printf(LOG_MODULE"server started on port %d\n", port);
 
@@ -150,7 +151,7 @@ static void handle_client_data(const ServerHandle_t *handle, int client_fd) {
     ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
     if (bytes_read > 0) {
-      int bytes_to_send = handle->callback(client_fd, buffer, sizeof(buffer), bytes_read);
+      int bytes_to_send = handle->callback(handle, client_fd, buffer, sizeof(buffer), bytes_read);
 
       if (bytes_to_send > 0) {
         if (send(client_fd, buffer, bytes_to_send, 0) < 0) {

@@ -10,13 +10,7 @@
 
 #define LOG_MODULE "[main] "
 
-ssize_t server_callback(int fd, void *buffer, ssize_t buffer_size, ssize_t recv_size) {
-  ssize_t output_size = 0;
-  if (!protocol_handle(buffer, buffer_size, recv_size, &output_size)) {
-    fprintf(stderr, LOG_MODULE"error processing command\n");
-  }
-  return output_size;
-}
+static ssize_t server_callback(const void *server, int fd, void *buffer, ssize_t buffer_size, ssize_t recv_size);
 
 int main(int argc, char **argv) {
   ServerHandle_t server;
@@ -32,8 +26,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  CommandsContext_t ctx = { .mp = mp };
-
+  CommandsContext_t ctx = { .mp = &mp };
   commands_init(&ctx);
 
   while (true) {
@@ -41,4 +34,13 @@ int main(int argc, char **argv) {
   }
 
   return 0;
+}
+
+static ssize_t server_callback(const void *server, int fd, void *buffer, ssize_t buffer_size, ssize_t recv_size) {
+  ServerHandle_t *server_handle = (ServerHandle_t *)server;
+  ssize_t output_size = 0;
+  if (!protocol_handle(buffer, buffer_size, recv_size, &output_size)) {
+    fprintf(stderr, LOG_MODULE"error processing command\n");
+  }
+  return output_size;
 }

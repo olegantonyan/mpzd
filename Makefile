@@ -11,27 +11,6 @@ build:
 clean:
 	rm -rf $(CMAKE_BUILD_DIR)
 
-######
-
-info:
-	echo '{"cmd":"info"}' | ncat localhost 6601
-
-play:
-	echo '{"cmd":"play","filepath":"/run/media/oleg/c3996ce0-a379-4403-9d64-7d4c0536463f/music/The_Kovenant_-_Fragments_of_Reality_(Sample)_-_(mp3poisk.net).mp3"}' | ncat localhost 6601
-
-stop:
-	echo '{"cmd":"stop"}' | ncat localhost 6601
-
-pause:
-	echo '{"cmd":"pause"}' | ncat localhost 6601
-
-unpause:
-	echo '{"cmd":"unpause"}' | ncat localhost 6601
-
-get_state:
-		echo '{"cmd":"get_state"}' | ncat localhost 6601
-
-ls:
-	echo '{"cmd":"ls","path":"/run/media/oleg/c3996ce0-a379-4403-9d64-7d4c0536463f/music"}' | ncat localhost 6601
-
 .PHONY: build run clean
+
+include _testing.mk
