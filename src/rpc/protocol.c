@@ -52,17 +52,13 @@ bool protocol_handle(void *buffer, ssize_t buffer_size, ssize_t input_size, ssiz
     if (strcmp(c->cmd, command) == 0) {
       cJSON *result = cJSON_CreateObject();
       if (!c->func(json, result)) {
-        fprintf(stderr, "error executing command '%s'\n", command);
+        fprintf(stderr, "%s command error\n", command);
+      }
+      if (!cJSON_PrintPreallocated(result, buffer, buffer_size - 5, 0)) {
+        fprintf(stderr, "error printing command results\n");
         cJSON_Delete(result);
         cJSON_Delete(json);
         return false;
-      } else {
-        if (!cJSON_PrintPreallocated(result, buffer, buffer_size - 5, 0)) {
-          fprintf(stderr, "error printing command results\n");
-          cJSON_Delete(result);
-          cJSON_Delete(json);
-          return false;
-        }
       }
       cJSON_Delete(result);
       break;

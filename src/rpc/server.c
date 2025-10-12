@@ -75,6 +75,8 @@ bool server_init(ServerHandle_t *out_handle, unsigned short port, ServerCallback
   out_handle->server_fd = server_fd;
   out_handle->callback = callback;
 
+  printf("server started on port %d\n", port);
+
   return true;
 }
 
@@ -140,7 +142,7 @@ static void handle_new_connection(const ServerHandle_t *handle) {
 }
 
 static void handle_client_data(const ServerHandle_t *handle, int client_fd) {
-  unsigned char buffer[50000] = { 0 };
+  unsigned char buffer[1000000] = { 0 };
   ssize_t bytes_read;
 
   while (true) {

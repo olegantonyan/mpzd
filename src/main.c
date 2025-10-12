@@ -39,12 +39,21 @@ ssize_t server_callback(int fd, void *buffer, ssize_t buffer_size, ssize_t recv_
 
 int main(int argc, char **argv) {
   ServerHandle_t server;
-  if (!server_init(&server, 6600, server_callback)) {
+  if (!server_init(&server, 6601, server_callback)) {
     fprintf(stderr, "error initilizing server");
     return 1;
   }
 
-  commands_init();
+  MediaPlayerHandle_t mp;
+  MediaPlayerResult_t init_res = mediaplayer_init(&mp);
+  if (!init_res.ok) {
+    fprintf(stderr, "error initializing mediaplayer: %s\n", init_res.error_string);
+    return 1;
+  }
+
+  CommandsContext_t ctx = { .mp = mp };
+
+  commands_init(&ctx);
 
   while (1) {
     server_poll(&server);
