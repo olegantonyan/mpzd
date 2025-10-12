@@ -12,6 +12,7 @@
 #include <errno.h>
 
 #define MAX_EVENTS 64
+#define LOG_MODULE "[server] "
 
 static bool set_nonblocking(int fd);
 static void handle_client_data(const ServerHandle_t *handle, int client_fd);
@@ -20,13 +21,13 @@ static void handle_new_connection(const ServerHandle_t *handle);
 bool server_init(ServerHandle_t *out_handle, unsigned short port, ServerCallbackFunction_t callback) {
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd == 0) {
-    perror("socket(AF_INET, SOCK_STREAM, 0)");
+    perror(LOG_MODULE"socket(AF_INET, SOCK_STREAM, 0)");
     return false;
   }
 
   int opt = 1;
   if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
-    perror("setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))");
+    perror(LOG_MODULE"setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))");
     close(server_fd);
     return false;
   }
@@ -41,20 +42,20 @@ bool server_init(ServerHandle_t *out_handle, unsigned short port, ServerCallback
   address.sin_addr.s_addr = INADDR_ANY;
   address.sin_port = htons(port);
   if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-    perror("bind(server_fd, (struct sockaddr *)&address, sizeof(address)");
+    perror(LOG_MODULE"bind(server_fd, (struct sockaddr *)&address, sizeof(address)");
     close(server_fd);
     return false;
   }
 
   if (listen(server_fd, SOMAXCONN) < 0) {
-    perror("listen(server_fd, SOMAXCONN)");
+    perror(LOG_MODULE"listen(server_fd, SOMAXCONN)");
     close(server_fd);
     return false;
   }
 
   int epoll_fd = epoll_create1(0);
   if (epoll_fd == -1) {
-    perror("epoll_create1(0)");
+    perror(LOG_MODULE"epoll_create1(0)");
     close(server_fd);
     close(epoll_fd);
     return false;
@@ -65,7 +66,7 @@ bool server_init(ServerHandle_t *out_handle, unsigned short port, ServerCallback
   event.data.fd = server_fd;
 
   if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) < 0) {
-    perror("epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event)");
+    perror(LOG_MODULE"epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event)");
     close(server_fd);
     close(epoll_fd);
     return false;
@@ -75,7 +76,7 @@ bool server_init(ServerHandle_t *out_handle, unsigned short port, ServerCallback
   out_handle->server_fd = server_fd;
   out_handle->callback = callback;
 
-  printf("server started on port %d\n", port);
+  printf(LOG_MODULE"server started on port %d\n", port);
 
   return true;
 }
@@ -85,7 +86,7 @@ bool server_poll(const ServerHandle_t *handle) {
 
   int nfds = epoll_wait(handle->epoll_fd, events, MAX_EVENTS, -1);
   if (nfds == -1) {
-    perror("epoll_wait(handle->epoll_fd, events, MAX_EVENTS, -1)");
+    perror(LOG_MODULE"epoll_wait(handle->epoll_fd, events, MAX_EVENTS, -1)");
     return false;
   }
 
@@ -103,12 +104,12 @@ bool server_poll(const ServerHandle_t *handle) {
 static bool set_nonblocking(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags < 0) {
-    perror("fcntl(fd, F_GETFL, 0)");
+    perror(LOG_MODULE"fcntl(fd, F_GETFL, 0)");
     return false;
   }
 
   if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-    perror("fcntl(fd, F_SETFL, flags | O_NONBLOCK)");
+    perror(LOG_MODULE"fcntl(fd, F_SETFL, flags | O_NONBLOCK)");
     return false;
   }
   return true;
@@ -130,14 +131,14 @@ static void handle_new_connection(const ServerHandle_t *handle) {
     event.data.fd = client_fd;
 
     if (epoll_ctl(handle->epoll_fd, EPOLL_CTL_ADD, client_fd, &event) < 0) {
-      perror("epoll_ctl(handle->epoll_fd, EPOLL_CTL_ADD, client_fd, &event)");
+      perror(LOG_MODULE"epoll_ctl(handle->epoll_fd, EPOLL_CTL_ADD, client_fd, &event)");
       close(client_fd);
       continue;
     }
   }
 
   if (client_fd < 0 && (errno != EAGAIN && errno != EWOULDBLOCK)) {
-    perror("accept");
+    perror(LOG_MODULE"accept");
   }
 }
 
@@ -153,7 +154,7 @@ static void handle_client_data(const ServerHandle_t *handle, int client_fd) {
 
       if (bytes_to_send > 0) {
         if (send(client_fd, buffer, bytes_to_send, 0) < 0) {
-          perror("send(client_fd, buffer, bytes_to_send, 0)");
+          perror(LOG_MODULE"send(client_fd, buffer, bytes_to_send, 0)");
           break;
         }
       } else {
@@ -167,7 +168,7 @@ static void handle_client_data(const ServerHandle_t *handle, int client_fd) {
       break;
     } else {
       if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        perror("recv(client_fd, buffer, sizeof(buffer) - 1, 0)");
+        perror(LOG_MODULE"recv(client_fd, buffer, sizeof(buffer) - 1, 0)");
         epoll_ctl(handle->epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
         close(client_fd);
       }

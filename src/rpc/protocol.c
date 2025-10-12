@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 #define MAX_COMMANDS 100
+#define LOG_MODULE "[protocol] "
 
 typedef struct {
   const char *cmd;
@@ -32,7 +33,7 @@ bool protocol_handle(void *buffer, ssize_t buffer_size, ssize_t input_size, ssiz
   if (json == NULL) {
     const char *error_ptr = cJSON_GetErrorPtr();
     if (error_ptr != NULL) {
-      fprintf(stderr, "json parse error: %s\n", error_ptr);
+      fprintf(stderr, LOG_MODULE"json parse error: %s\n", error_ptr);
     }
     cJSON_Delete(json);
     return false;
@@ -40,7 +41,7 @@ bool protocol_handle(void *buffer, ssize_t buffer_size, ssize_t input_size, ssiz
 
   cJSON *cmd = cJSON_GetObjectItemCaseSensitive(json, "cmd");
   if (!cJSON_IsString(cmd) || (cmd->valuestring == NULL)) {
-    fprintf(stderr, "no command field, skipping\n");
+    fprintf(stderr, LOG_MODULE"no command field, skipping\n");
     cJSON_Delete(json);
     return false;
   }
@@ -52,10 +53,10 @@ bool protocol_handle(void *buffer, ssize_t buffer_size, ssize_t input_size, ssiz
     if (strcmp(c->cmd, command) == 0) {
       cJSON *result = cJSON_CreateObject();
       if (!c->func(json, result)) {
-        fprintf(stderr, "%s command error\n", command);
+        fprintf(stderr, LOG_MODULE"'%s' command error\n", command);
       }
       if (!cJSON_PrintPreallocated(result, buffer, buffer_size - 5, 0)) {
-        fprintf(stderr, "error printing command results\n");
+        fprintf(stderr, LOG_MODULE"error printing command results\n");
         cJSON_Delete(result);
         cJSON_Delete(json);
         return false;

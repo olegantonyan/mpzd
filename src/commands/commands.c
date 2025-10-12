@@ -5,7 +5,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <dirent.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include <cjson/cJSON.h>
+
+#define LOG_MODULE "[commands] "
 
 static CommandsContext_t *context = NULL;
 
@@ -90,6 +95,52 @@ static bool get_state(const cJSON *input, cJSON *output) {
   return true;
 }
 
+static bool ls(const cJSON *input, cJSON *output) {
+  cJSON *path = cJSON_GetObjectItemCaseSensitive(input, "path");
+  if (!cJSON_IsString(path) || (path->valuestring == NULL)) {
+    cJSON_AddStringToObject(output, "error", "no path provided");
+    return false;
+  }
+
+  DIR *dir = opendir(path->valuestring);
+  if (!dir) {
+    cJSON_AddStringToObject(output, "error", strerror(errno));
+    return false;
+  }
+
+  cJSON *files = cJSON_CreateArray();
+  cJSON *dirs = cJSON_CreateArray();
+
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+
+    char fullpath[10000];
+    snprintf(fullpath, sizeof(fullpath), "%s/%s", path->valuestring, entry->d_name);
+
+    struct stat st;
+    if (stat(fullpath, &st) == -1) {
+      perror(LOG_MODULE"ls: stat");
+      continue;
+    }
+
+    if (S_ISDIR(st.st_mode)) {
+      cJSON_AddItemToArray(dirs, cJSON_CreateString(entry->d_name));
+    } else if (S_ISREG(st.st_mode)) {
+      cJSON_AddItemToArray(files, cJSON_CreateString(entry->d_name));
+    }
+  }
+
+  cJSON_AddItemToObject(output, "files", files);
+  cJSON_AddItemToObject(output, "dirs", dirs);
+
+  closedir(dir);
+
+  return true;
+}
+
 void commands_init(CommandsContext_t *ctx) {
   context = ctx;
   protocol_register("info", info);
@@ -98,4 +149,5 @@ void commands_init(CommandsContext_t *ctx) {
   protocol_register("pause", _pause);
   protocol_register("unpause", unpause);
   protocol_register("get_state", get_state);
+  protocol_register("ls", ls);
 }

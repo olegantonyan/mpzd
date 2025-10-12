@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#define LOG_MODULE "[mediaplayer] "
+
 MediaPlayerResult_t mediaplayer_init(MediaPlayerHandle_t *handle) {
   MediaPlayerResult_t result = { .ok = true, .error_string = NULL };
   int error = 0;
