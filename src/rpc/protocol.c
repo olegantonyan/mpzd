@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <cjson/cJSON.h>
 
 #define MAX_COMMANDS 100
 
@@ -41,46 +40,36 @@ bool protocol_handle(void *buffer, ssize_t buffer_size, ssize_t input_size, ssiz
 
   cJSON *cmd = cJSON_GetObjectItemCaseSensitive(json, "cmd");
   if (!cJSON_IsString(cmd) || (cmd->valuestring == NULL)) {
+    fprintf(stderr, "no command field, skipping\n");
     cJSON_Delete(json);
     return false;
   }
 
   const char *command = cmd->valuestring;
-  ProtocolCommandArgument_t *arguments = NULL;
-  int arguemnts_count = 0;
-
-  cJSON *args = cJSON_GetObjectItemCaseSensitive(json, "args");
-  if (cJSON_IsArray(args)) {
-    arguemnts_count = cJSON_GetArraySize(args);
-    arguments = malloc(arguemnts_count * sizeof(ProtocolCommandArgument_t));
-    for (int i = 0; i < arguemnts_count; i++) {
-      cJSON *item = cJSON_GetArrayItem(args, i);
-      if (cJSON_IsString(item)) {
-        ProtocolCommandArgumentValue_t v = { .valuestring = item->valuestring };
-        ProtocolCommandArgument_t a = { .type = PROTOCOL_COMMAND_TYPE_STRING, .value = v };
-        arguments[i] = a;
-      } else if (cJSON_IsNumber(item)) {
-        ProtocolCommandArgumentValue_t v = { .valueint = item->valueint };
-        ProtocolCommandArgument_t a = { .type = PROTOCOL_COMMAND_TYPE_INTEGER, .value = v };
-        arguments[i] = a;
-      }
-    }
-  }
 
   for (int i = 0; i < registered_commands_count; i++) {
     ProtocolCommand_t *c = &registered_commands[i];
     if (strcmp(c->cmd, command) == 0) {
-    //  c->func();
+      cJSON *result = cJSON_CreateObject();
+      if (!c->func(json, result)) {
+        fprintf(stderr, "error executing command '%s'\n", command);
+        cJSON_Delete(result);
+        cJSON_Delete(json);
+        return false;
+      } else {
+        if (!cJSON_PrintPreallocated(result, buffer, buffer_size - 5, 0)) {
+          fprintf(stderr, "error printing command results\n");
+          cJSON_Delete(result);
+          cJSON_Delete(json);
+          return false;
+        }
+      }
+      cJSON_Delete(result);
       break;
     }
   }
 
-  snprintf(buffer, buffer_size, "your command was: %s %d\n", cmd->valuestring, arguments[0].value.valueint);
-  *output_size = strlen(buffer);
-
   cJSON_Delete(json);
-  if (arguments) {
-    free(arguments);
-  }
+  *output_size = strlen(buffer);
   return true;
 }

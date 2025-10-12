@@ -9,11 +9,14 @@ set(PROJECT_SOURCES
   mediaplayer/mediaplayer.c
   rpc/server.c
   rpc/protocol.c
+  commands/commands.c
 )
 
 add_executable(${CMAKE_PROJECT_NAME} ${PROJECT_SOURCES})
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/../generated)
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${MPV_INCLUDE_DIRS})
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${MPV_LIBRARIES})

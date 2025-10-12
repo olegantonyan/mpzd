@@ -1,6 +1,7 @@
 #include "mediaplayer/mediaplayer.h"
 #include "rpc/server.h"
 #include "rpc/protocol.h"
+#include "commands/commands.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,20 +29,22 @@ void enable_raw_mode() {
     atexit(disable_raw_mode);
 }
 
-ssize_t cb(int fd, void *buffer, ssize_t buffer_size, ssize_t recv_size) {
+ssize_t server_callback(int fd, void *buffer, ssize_t buffer_size, ssize_t recv_size) {
   ssize_t output_size = 0;
   if (!protocol_handle(buffer, buffer_size, recv_size, &output_size)) {
-    fprintf(stderr, "error processing command\n");
+    // fprintf(stderr, "error processing command\n");
   }
   return output_size;
 }
 
 int main(int argc, char **argv) {
   ServerHandle_t server;
-  if (!server_init(&server, 6600, cb)) {
+  if (!server_init(&server, 6600, server_callback)) {
     fprintf(stderr, "error initilizing server");
     return 1;
   }
+
+  commands_init();
 
   while (1) {
     server_poll(&server);
