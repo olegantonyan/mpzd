@@ -141,7 +141,12 @@ static bool ls(const cJSON *input, cJSON *output) {
   return true;
 }
 
-void commands_init(const CommandsContext_t *ctx) {
+bool commands_init(const CommandsContext_t *ctx) {
+  if (context) {
+    fprintf(stderr, LOG_MODULE"already initialized\n");
+    return false;
+  }
+
   context = ctx;
   protocol_register("info", info);
   protocol_register("play", play);
@@ -150,4 +155,6 @@ void commands_init(const CommandsContext_t *ctx) {
   protocol_register("unpause", unpause);
   protocol_register("get_state", get_state);
   protocol_register("ls", ls);
+
+  return true;
 }

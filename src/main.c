@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  CommandsContext_t ctx = { .mp = &mp };
+  CommandsContext_t ctx = { .mp = &mp, .server = &server };
   commands_init(&ctx);
 
   while (true) {
