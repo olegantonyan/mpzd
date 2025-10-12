@@ -12,6 +12,13 @@
 
 #define LOG_MODULE "[commands] "
 
+#define REGISTER(name, function) do { \
+  if (!protocol_register(name, function)) { \
+    fprintf(stderr, LOG_MODULE"cannot register command '%s'\n", name); \
+    return false; \
+  } \
+} while (false)
+
 static const CommandsContext_t *context = NULL;
 
 static bool info(const cJSON *input, cJSON *output) {
@@ -148,13 +155,13 @@ bool commands_init(const CommandsContext_t *ctx) {
   }
 
   context = ctx;
-  protocol_register("info", info);
-  protocol_register("play", play);
-  protocol_register("stop", stop);
-  protocol_register("pause", _pause);
-  protocol_register("unpause", unpause);
-  protocol_register("get_state", get_state);
-  protocol_register("ls", ls);
+  REGISTER("info", info);
+  REGISTER("play", play);
+  REGISTER("stop", stop);
+  REGISTER("pause", _pause);
+  REGISTER("unpause", unpause);
+  REGISTER("get_state", get_state);
+  REGISTER("ls", ls);
 
   return true;
 }
