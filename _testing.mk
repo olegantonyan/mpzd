@@ -1,27 +1,36 @@
 HOST=localhost
 PORT=6601
 LIBRARY_DIR=/run/media/oleg/c3996ce0-a379-4403-9d64-7d4c0536463f/music
-TEST_FILE=The_Kovenant_-_Fragments_of_Reality_(Sample)_-_(mp3poisk.net).mp3
+MPZD=printf '%s\n' $(1) | ncat --idle-timeout 1 $(HOST) $(PORT)
 
-info:
-	echo '{"cmd":"info"}' | ncat localhost 6601
+status:
+	$(call MPZD,status)
 
-play:
-	echo '{"cmd":"play","filepath":"$(LIBRARY_DIR)/$(TEST_FILE)"}' | ncat $(HOST) $(PORT)
-
-stop:
-	echo '{"cmd":"stop"}' | ncat $(HOST) $(PORT)
-
-pause:
-	echo '{"cmd":"pause"}' | ncat $(HOST) $(PORT)
-
-unpause:
-	echo '{"cmd":"unpause"}' | ncat $(HOST) $(PORT)
-
-get_state:
-		echo '{"cmd":"get_state"}' | ncat $(HOST) $(PORT)
+libraries:
+	$(call MPZD,libraries)
 
 ls:
-	echo '{"cmd":"ls","path":"$(LIBRARY_DIR)"}' | $(HOST) $(PORT)
+	$(call MPZD,'ls "$(LIBRARY_DIR)"')
 
-.PHONY: info play stop pause unpause get_state ls
+playlists:
+	$(call MPZD,playlists)
+
+play:
+	$(call MPZD,play)
+
+pause:
+	$(call MPZD,pause)
+
+stop:
+	$(call MPZD,stop)
+
+next:
+	$(call MPZD,next)
+
+prev:
+	$(call MPZD,prev)
+
+watch:
+	(echo 'watch on'; cat) | ncat $(HOST) $(PORT)
+
+.PHONY: status libraries ls playlists play pause stop next prev watch

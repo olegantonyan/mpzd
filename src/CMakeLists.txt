@@ -1,32 +1,34 @@
-set(CMAKE_C_STANDARD 17)
+find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswresample)
+pkg_check_modules(ALSA REQUIRED IMPORTED_TARGET alsa)
 
-set(PROJECT_SOURCES
-  main.c
-  mediaplayer/mediaplayer.c
-  rpc/server.c
-  rpc/protocol.c
-  commands/commands.c
+add_library(mpzdcore STATIC
+  app.c
+  util/util.c
+  model/track.c
+  model/model.c
+  model/sort.c
+  library/library.c
+  library/tags.c
+  library/cue.c
+  library/m3u.c
+  library/scan.c
+  store/store.c
+  net/server.c
+  proto/proto.c
+  proto/cmd_meta.c
+  proto/cmd_library.c
+  proto/cmd_playlist.c
+  proto/cmd_player.c
+  player/audio.c
+  player/player.c
 )
 
-add_executable(${CMAKE_PROJECT_NAME} ${PROJECT_SOURCES})
+target_include_directories(mpzdcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(mpzdcore PUBLIC PkgConfig::FFMPEG PkgConfig::ALSA Threads::Threads)
 
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/../generated)
+add_executable(mpzd main.c)
+target_link_libraries(mpzd PRIVATE mpzdcore)
 
-find_package(PkgConfig REQUIRED)
-
-pkg_check_modules(MPV REQUIRED mpv)
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${MPV_INCLUDE_DIRS})
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${MPV_LIBRARIES})
-target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE ${MPV_CFLAGS_OTHER})
-
-pkg_check_modules(CJSON REQUIRED libcjson)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${CJSON_LIBRARIES})
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${CJSON_INCLUDE_DIRS})
-target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE ${CJSON_CFLAGS_OTHER})
-
-pkg_check_modules(TAGLIB REQUIRED taglib)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${TAGLIB_LIBRARIES})
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${TAGLIB_INCLUDE_DIRS})
-target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE ${TAGLIB_CFLAGS_OTHER})
+install(TARGETS mpzd RUNTIME DESTINATION bin)
