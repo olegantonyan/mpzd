@@ -6,29 +6,36 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool libraries(int argc, char **argv) {
-  for (size_t i = 0; i < M.nroots; i++) {
-    r_str("library", M.roots[i]);
-  }
+static bool library(int argc, char **argv) {
+  r_str("library", M.library);
   return true;
 }
 
 static bool ls(int argc, char **argv) {
-  LsSort sort = LS_NAME;
+  const char *path = M.library;
+  if (argc > 0 && argv[0][0] == '/') {
+    path = argv[0];
+    argc--;
+    argv++;
+  }
   if (argc > 1) {
-    if (strcmp(argv[1], "name") == 0) {
+    return r_err(E_ARG, "expected [path] [name|date|-date]");
+  }
+  LsSort sort = LS_NAME;
+  if (argc > 0) {
+    if (strcmp(argv[0], "name") == 0) {
       sort = LS_NAME;
-    } else if (strcmp(argv[1], "date") == 0) {
+    } else if (strcmp(argv[0], "date") == 0) {
       sort = LS_DATE;
-    } else if (strcmp(argv[1], "-date") == 0) {
+    } else if (strcmp(argv[0], "-date") == 0) {
       sort = LS_DATE_DESC;
     } else {
       return r_err(E_ARG, "expected name|date|-date");
     }
   }
-  char *dir = library_resolve(argv[0]);
+  char *dir = library_resolve(path);
   if (!dir) {
-    return r_err(E_NOT_FOUND, "not found or outside libraries");
+    return r_err(E_NOT_FOUND, "not found or outside the library");
   }
   LsEntry *entries;
   size_t n;
@@ -45,7 +52,7 @@ static bool ls(int argc, char **argv) {
 }
 
 const Command cmd_library[] = {
-  { "libraries", libraries, 0, 0 },
-  { "ls", ls, 1, 2 },
+  { "library", library, 0, 0 },
+  { "ls", ls, 0, 2 },
   { NULL, NULL, 0, 0 },
 };

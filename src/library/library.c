@@ -18,29 +18,19 @@ static bool is_under(const char *path, const char *root) {
   return strncmp(path, root, n) == 0 && (path[n] == '\0' || path[n] == '/');
 }
 
-const char *library_root_of(const char *resolved) {
-  const char *best = NULL;
-  for (size_t i = 0; i < M.nroots; i++) {
-    if (is_under(resolved, M.roots[i]) && (!best || strlen(M.roots[i]) > strlen(best))) {
-      best = M.roots[i];
-    }
-  }
-  return best;
-}
-
 char *library_resolve(const char *path) {
   char *real = realpath(path, NULL);
   if (!real) {
     return NULL;
   }
-  if (!library_root_of(real)) {
+  if (!M.library || !is_under(real, M.library)) {
     free(real);
     return NULL;
   }
   return real;
 }
 
-int library_root_add(const char *path) {
+int library_set(const char *path) {
   char *real = realpath(path, NULL);
   if (!real) {
     return -errno;
@@ -50,14 +40,8 @@ int library_root_add(const char *path) {
     free(real);
     return -ENOTDIR;
   }
-  for (size_t i = 0; i < M.nroots; i++) {
-    if (strcmp(M.roots[i], real) == 0) {
-      free(real);
-      return -EEXIST;
-    }
-  }
-  size_t cap = M.nroots;
-  VEC_PUSH(M.roots, M.nroots, cap, real);
+  free(M.library);
+  M.library = real;
   return 0;
 }
 
@@ -125,9 +109,8 @@ char *library_playlist_name(char *const *paths, size_t n) {
   for (size_t i = 0; i < n; i++) {
     const char *p = paths[i];
     if (!path_is_url(p)) {
-      const char *root = library_root_of(p);
-      if (root && strcmp(root, p) != 0) {
-        p += strlen(root);
+      if (M.library && is_under(p, M.library) && strcmp(M.library, p) != 0) {
+        p += strlen(M.library);
         while (*p == '/') p++;
       } else {
         p = path_basename(p);

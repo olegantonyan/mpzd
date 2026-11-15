@@ -33,13 +33,14 @@ typedef struct {
   char *device;
   char *state_dir;
   char *max_clients;
+  char *library;
 } Config;
 
 static int save_timer = -1;
 static bool save_armed;
 
 static void usage(const char *prog) {
-  printf("usage: %s [-c config] [-l library_dir]... [-d state_dir] [-b bind_addr] [-p port] [-s unix_socket] [-o alsa_device]\n", prog);
+  printf("usage: %s [-c config] [-l library_dir] [-d state_dir] [-b bind_addr] [-p port] [-s unix_socket] [-o alsa_device]\n", prog);
 }
 
 static void set(char **dst, const char *v) {
@@ -65,7 +66,7 @@ static void config_free(Config *c) {
   }
 }
 
-static bool config_load(const char *path, Config *c, StrVec *libs) {
+static bool config_load(const char *path, Config *c) {
   FILE *f = fopen(path, "r");
   if (!f) {
     fprintf(stderr, "cannot open %s: %s\n", path, strerror(errno));
@@ -94,7 +95,7 @@ static bool config_load(const char *path, Config *c, StrVec *libs) {
     else if (strcmp(key, "device") == 0) set(&c->device, s);
     else if (strcmp(key, "state_dir") == 0) set(&c->state_dir, s);
     else if (strcmp(key, "max_clients") == 0) set(&c->max_clients, s);
-    else if (strcmp(key, "library") == 0) strvec_push(libs, xstrdup(s));
+    else if (strcmp(key, "library") == 0) set(&c->library, s);
     else fprintf(stderr, "%s: unknown key '%s'\n", path, key);
   }
   free(line);
@@ -170,14 +171,12 @@ int main(int argc, char **argv) {
 
   Config cli = { 0 };
   Config cfg = { 0 };
-  StrVec cli_libs = { 0 };
-  StrVec libs = { 0 };
   const char *config_path = NULL;
   int opt;
   while ((opt = getopt(argc, argv, "c:l:d:b:p:s:o:hV")) != -1) {
     switch (opt) {
       case 'c': config_path = optarg; break;
-      case 'l': strvec_push(&cli_libs, xstrdup(optarg)); break;
+      case 'l': set(&cli.library, optarg); break;
       case 'd': set(&cli.state_dir, optarg); break;
       case 'b': set(&cli.bind, optarg); break;
       case 'p': set(&cli.port, optarg); break;
@@ -196,14 +195,15 @@ int main(int argc, char **argv) {
   char *state_dir = default_state_dir();
   set(&cfg.state_dir, state_dir);
   free(state_dir);
-  if (config_path && !config_load(config_path, &cfg, &libs)) {
+  if (config_path && !config_load(config_path, &cfg)) {
     return 1;
   }
   overlay(&cfg, &cli);
   config_free(&cli);
-  if (cli_libs.len) {
-    strvec_free(&libs);
-    libs = cli_libs;
+  if (!cfg.library) {
+    fprintf(stderr, "no library folder configured (-l or library)\n");
+    config_free(&cfg);
+    return 1;
   }
 
   sigset_t mask;
@@ -216,6 +216,13 @@ int main(int argc, char **argv) {
 
   tags_init();
   model_init();
+  int lib_rc = library_set(cfg.library);
+  if (lib_rc < 0) {
+    LOG("library %s: %s", cfg.library, strerror(-lib_rc));
+    model_free();
+    config_free(&cfg);
+    return 1;
+  }
   if (!store_init(cfg.state_dir)) {
     return 1;
   }
@@ -225,17 +232,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   fix_selection();
-  for (size_t i = 0; i < libs.len; i++) {
-    int rc = library_root_add(libs.v[i]);
-    if (rc < 0 && rc != -EEXIST) {
-      LOG("library %s: %s", libs.v[i], strerror(-rc));
-    }
-  }
-  strvec_free(&libs);
-  if (!M.nroots) {
-    LOG("no library folders configured");
-  }
-  LOG("mpzd %s, state %s, %zu playlists", PROJECT_VERSION, cfg.state_dir, M.len);
+  LOG("mpzd %s, library %s, state %s, %zu playlists", PROJECT_VERSION, M.library, cfg.state_dir, M.len);
 
   ServerConfig scfg = {
     .bind = cfg.bind,

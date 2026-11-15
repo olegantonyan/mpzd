@@ -1,7 +1,7 @@
 CMAKE_BUILD_DIR=build
 
 run: build
-	$(CMAKE_BUILD_DIR)/src/mpzd -l /run/media/oleg/c3996ce0-a379-4403-9d64-7d4c0536463f/music/ -l /run/media/oleg/c3996ce0-a379-4403-9d64-7d4c0536463f/unsorted/
+	$(CMAKE_BUILD_DIR)/src/mpzd -l /run/media/oleg/c3996ce0-a379-4403-9d64-7d4c0536463f/music/
 
 build:
 	cmake -S . -B $(CMAKE_BUILD_DIR)

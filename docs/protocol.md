@@ -41,19 +41,19 @@ Playlist ids and track ids are stable across restarts. Track ids are unique with
 
 ### Library
 
-Paths must be inside a library. Libraries are daemon configuration (`library` in the config file or `-l`), not changeable over the protocol. `ls` lists only folders and supported files (audio, `cue`, `m3u`, `m3u8`, `pls`); hidden entries are skipped. Folders come first.
+Paths are absolute and must be inside the library: one folder per daemon, set by `-l` or `library` in the config file. `ls` lists only folders and supported files (audio, `cue`, `m3u`, `m3u8`, `pls`); hidden entries are skipped. Folders come first.
 
 | Command | Reply |
 |---|---|
-| `libraries` | `library` per library folder |
-| `ls <path> [name\|date\|-date]` | `dir` / `file` per entry (names, not paths) |
+| `library` | `library` |
+| `ls [<path>] [name\|date\|-date]` | `dir` / `file` per entry (names, not paths). `<path>` defaults to the library |
 
 ### Playlists
 
 | Command | Reply / effect |
 |---|---|
 | `playlists` | per playlist: `playlist`, `name`, `count`, `order`, `scanning` (pending scans) |
-| `pl_new <name\|-> <path\|url>...` | `playlist`. Created immediately, filled asynchronously (`! scan`). `-` names it from the paths relative to their library |
+| `pl_new <name\|-> <path\|url>...` | `playlist`. Created immediately, filled asynchronously (`! scan`). `-` names it from the paths relative to the library |
 | `pl_add <pl> [at <pos>] <path\|url>...` | Async append or insert |
 | `pl_tracks <pl> [from [count]]` | `total`, then track records. `count` defaults to 1000 |
 | `pl_track <pl> <track>` | `pos` and the track record |

@@ -140,10 +140,7 @@ void model_free(void) {
     playlist_free(M.pls[i]);
   }
   free(M.pls);
-  for (size_t i = 0; i < M.nroots; i++) {
-    free(M.roots[i]);
-  }
-  free(M.roots);
+  free(M.library);
   memset(&M, 0, sizeof(M));
 }
 

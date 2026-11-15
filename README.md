@@ -1,6 +1,6 @@
 # mpzd
 
-Headless music daemon following [mpz](https://github.com/olegantonyan/mpz)'s model: library folders, playlists made from folders, and playback straight from a playlist (no queue, no database). Aimed at small Linux boards.
+Headless music daemon following [mpz](https://github.com/olegantonyan/mpz)'s model: a library folder, playlists made from folders, and playback straight from a playlist (no queue, no database). Aimed at small Linux boards.
 
 Protocol: [docs/protocol.md](docs/protocol.md).
 
@@ -25,10 +25,10 @@ For embedded targets, a minimal FFmpeg keeps the footprint small, for example:
 ## Run
 
 ```
-mpzd [-c config] [-l library_dir]... [-d state_dir] [-b bind_addr] [-p port] [-s unix_socket] [-o alsa_device]
+mpzd [-c config] [-l library_dir] [-d state_dir] [-b bind_addr] [-p port] [-s unix_socket] [-o alsa_device]
 ```
 
-Library folders are given with `-l` (repeatable) or `library` lines in the config file; `-l` replaces the config file's list. Paths outside them are rejected.
+One library folder per instance, required: `-l` or `library` in the config file. Paths outside it are rejected.
 
 Defaults: `127.0.0.1:6601`, ALSA device `default`, state in `$XDG_STATE_HOME/mpzd`. An empty `-p ''` disables TCP. Use a plug device (`default`, `plughw:...`) unless the hardware supports every sample rate you play.
 
@@ -36,7 +36,6 @@ Config file (`key value` lines, CLI flags win):
 
 ```
 library /music
-library /mnt/usb/music
 bind 0.0.0.0
 port 6601
 socket /run/mpzd.sock

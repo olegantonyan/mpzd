@@ -63,15 +63,6 @@ static bool arg_at(int *argc, char ***argv, int64_t *at) {
 }
 
 static bool resolve_paths(int argc, char **argv, StrVec *out) {
-  if (M.nroots == 0) {
-    bool all_urls = true;
-    for (int i = 0; i < argc; i++) {
-      all_urls = all_urls && path_is_url(argv[i]);
-    }
-    if (!all_urls) {
-      return r_err(E_STATE, "no libraries configured");
-    }
-  }
   for (int i = 0; i < argc; i++) {
     if (path_is_url(argv[i])) {
       strvec_push(out, xstrdup(argv[i]));
@@ -80,7 +71,7 @@ static bool resolve_paths(int argc, char **argv, StrVec *out) {
     char *real = library_resolve(argv[i]);
     if (!real) {
       strvec_free(out);
-      return r_err(E_NOT_FOUND, "'%s' not found or outside libraries", argv[i]);
+      return r_err(E_NOT_FOUND, "'%s' not found or outside the library", argv[i]);
     }
     strvec_push(out, real);
   }
