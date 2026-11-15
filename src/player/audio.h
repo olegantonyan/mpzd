@@ -27,6 +27,7 @@ void audio_next(const AudioItem *item, uint64_t for_token);
 void audio_pause(bool pause);
 void audio_stop(void);
 void audio_set_volume(int volume);
+void audio_set_device(const char *device);
 bool audio_poll_event(AudioEvent *ev);
 void audio_ack_events(void);
 uint32_t audio_position_ms(void);

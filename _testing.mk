@@ -11,6 +11,9 @@ library:
 ls:
 	$(call MPZD,ls)
 
+outputs:
+	$(call MPZD,outputs)
+
 playlists:
 	$(call MPZD,playlists)
 
@@ -32,4 +35,4 @@ prev:
 watch:
 	(echo 'watch on'; cat) | ncat $(HOST) $(PORT)
 
-.PHONY: status library ls playlists play pause stop next prev watch
+.PHONY: status library ls outputs playlists play pause stop next prev watch

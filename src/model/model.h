@@ -28,6 +28,7 @@ typedef struct {
   size_t cap;
   uint32_t next_pl_id;
   char *library;
+  char *output;
   Order order;
   bool follow;
   int volume;

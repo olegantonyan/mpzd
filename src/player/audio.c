@@ -81,6 +81,7 @@ static struct {
   char *device;
 
   bool c_quit;
+  char *c_device;
   bool c_stop;
   bool c_play;
   bool c_play_paused;
@@ -684,6 +685,24 @@ static void do_pause(bool pause) {
   }
 }
 
+static void do_set_device(char *device) {
+  free(A.device);
+  A.device = device;
+  if (!T.pcm) {
+    return;
+  }
+  if (T.reopen_on_resume || !T.has_audible) {
+    pcm_close();
+    return;
+  }
+  update_position();
+  pcm_close();
+  Item it;
+  item_dup(&it, &T.audible.item);
+  do_play(&it, atomic_load(&A.pos_ms), T.paused);
+  item_clear(&it);
+}
+
 static void step(void) {
   uint8_t *data = NULL;
   int frames = decoder_pull(T.cur, &data);
@@ -710,7 +729,7 @@ static void step(void) {
 }
 
 static bool has_command(void) {
-  return A.c_quit || A.c_stop || A.c_play || A.c_next || A.c_pause >= 0;
+  return A.c_quit || A.c_device || A.c_stop || A.c_play || A.c_next || A.c_pause >= 0;
 }
 
 static void *audio_main(void *arg) {
@@ -742,6 +761,8 @@ static void *audio_main(void *arg) {
     uint64_t next_for = A.c_next_for;
     Item next_item = A.c_next_item;
     int pause = A.c_pause;
+    char *device = A.c_device;
+    A.c_device = NULL;
     memset(&A.c_play_item, 0, sizeof(Item));
     memset(&A.c_next_item, 0, sizeof(Item));
     A.c_stop = A.c_play = A.c_next = false;
@@ -751,7 +772,11 @@ static void *audio_main(void *arg) {
     if (quit) {
       item_clear(&play_item);
       item_clear(&next_item);
+      free(device);
       break;
+    }
+    if (device) {
+      do_set_device(device);
     }
     if (stop) {
       do_stop();
@@ -809,6 +834,16 @@ void audio_shutdown(void) {
   A.efd = -1;
   free(A.device);
   A.device = NULL;
+  free(A.c_device);
+  A.c_device = NULL;
+}
+
+void audio_set_device(const char *device) {
+  pthread_mutex_lock(&A.mu);
+  free(A.c_device);
+  A.c_device = xstrdup(device);
+  pthread_cond_signal(&A.cv);
+  pthread_mutex_unlock(&A.mu);
 }
 
 void audio_play(const AudioItem *item, uint32_t start_ms, bool paused) {

@@ -18,7 +18,7 @@ After `watch on` the server sends `! ...` lines between replies, never inside on
 
 | Event | Meaning |
 |---|---|
-| `! player` | Playback state, track, position jump, volume, order, follow, selection or ICY title changed |
+| `! player` | Playback state, track, position jump, volume, output, order, follow, selection or ICY title changed |
 | `! playlist <id>` | Tracks of a playlist changed (count included) |
 | `! playlists` | Playlist list or a playlist's name/order changed |
 | `! scan <id> done` | A folder scan for playlist `<id>` finished |
@@ -75,13 +75,15 @@ Track record: `track`, `file`, `begin_ms`/`end_ms` (cue only, `end_ms` absent fo
 
 | Command | Reply / effect |
 |---|---|
-| `status` | `state` (`play\|pause\|stop`); when there is a current track: `playlist`, the track record, `pos_ms`, `format`, `icy`; always: `volume`, `order`, `follow`, `sel_playlist`, `sel_track` |
+| `status` | `state` (`play\|pause\|stop`); when there is a current track: `playlist`, the track record, `pos_ms`, `format`, `icy`; always: `volume`, `output`, `order`, `follow`, `sel_playlist`, `sel_track` |
 | `play` | Resume if paused; otherwise the resume point saved at shutdown; otherwise the selected track; otherwise the first track of the selected playlist |
 | `play <pl> [<track>]` | Plays the track, or the playlist's first track |
 | `pause`, `toggle`, `stop` | |
 | `next`, `prev` | |
 | `seek <sec\|+sec\|-sec>` | Fractional seconds; `+`/`-` is relative |
 | `volume [<0-100>\|+n\|-n]` | `volume` |
+| `outputs` | per output: `output` (id), `desc`, `active` on the current one. ALSA: the `output` config lines plus the startup device; PipeWire: `default` plus the current sinks |
+| `output [<id>]` | `output`. Switches without stopping playback; the id must be in `outputs` |
 | `order [seq\|random\|noloop]` | Global order |
 | `select <pl> [<track>]` | The selection (mpz's cursor and current playlist) |
 | `follow [on\|off]` | Playback follows the selection |

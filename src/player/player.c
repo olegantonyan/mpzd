@@ -3,8 +3,10 @@
 #include "model/model.h"
 #include "net/server.h"
 #include "player/audio.h"
+#include "player/outputs.h"
 #include "util/util.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define LOG_MODULE "player"
@@ -440,6 +442,18 @@ bool player_seek(int64_t ms, bool relative) {
 void player_set_volume(int volume) {
   M.volume = volume < 0 ? 0 : (volume > 100 ? 100 : volume);
   audio_set_volume(M.volume);
+  changed();
+}
+
+void player_set_output(const char *id) {
+  if (M.output && strcmp(M.output, id) == 0) {
+    return;
+  }
+  free(M.output);
+  M.output = xstrdup(id);
+  char *pcm = outputs_pcm(id);
+  audio_set_device(pcm);
+  free(pcm);
   changed();
 }
 

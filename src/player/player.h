@@ -36,6 +36,7 @@ bool player_next(void);
 bool player_prev(void);
 bool player_seek(int64_t ms, bool relative);
 void player_set_volume(int volume);
+void player_set_output(const char *id);
 void player_select(TrackRef ref);
 void player_sync_hint(uint32_t pl_id);
 void player_playlist_deleted(uint32_t pl_id);

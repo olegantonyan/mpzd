@@ -254,6 +254,77 @@ static void test_store_roundtrip(void) {
   playlist_free(q);
 }
 
+static Playlist *store_roundtrip(const Playlist *p, long cut, long flip) {
+  FILE *f = tmpfile();
+  CHECK(store_write_playlist(f, p) && fflush(f) == 0);
+  long size = ftell(f);
+  if (cut > 0) {
+    CHECK(ftruncate(fileno(f), size - cut) == 0);
+  }
+  if (flip > 0) {
+    fseek(f, size - flip, SEEK_SET);
+    int c = fgetc(f);
+    fseek(f, size - flip, SEEK_SET);
+    fputc(c ^ 0x5a, f);
+  }
+  rewind(f);
+  Playlist *q = store_read_playlist(f);
+  fclose(f);
+  return q;
+}
+
+static void test_store_files(void) {
+  Playlist *p = playlist_new(3, "many");
+  const char *paths[] = { "/m/Artist/Album/01.flac", "/m/Artist/Album/02.flac", "/m/Other/X/01.flac", "/m/Other/X/01.flac" };
+  const char *artists[] = { "Artist", "Artist", "Other", "" };
+  for (int i = 0; i < 4; i++) {
+    TrackInfo info = {
+      .str = { [TS_PATH] = paths[i], [TS_ARTIST] = artists[i], [TS_ALBUM_ARTIST] = artists[i], [TS_ALBUM] = i < 2 ? "Album" : "X", [TS_TITLE] = i == 3 ? "" : "t" },
+      .dur_ms = 1000u * (unsigned)i, .year = 1999, .number = (uint16_t)(i + 1),
+    };
+    Track t;
+    track_init(&t, &info);
+    playlist_insert(p, (size_t)i, &t, 1);
+  }
+  uint32_t last = p->tracks[3].id;
+  playlist_move(p, 0, &last, 1);
+
+  Playlist *q = store_roundtrip(p, 0, 0);
+  CHECK(q != NULL);
+  if (q) {
+    CHECK(q->len == 4 && q->next_track_id == p->next_track_id);
+    for (size_t i = 0; i < q->len && i < p->len; i++) {
+      CHECK(q->tracks[i].id == p->tracks[i].id && q->tracks[i].dur_ms == p->tracks[i].dur_ms && q->tracks[i].number == p->tracks[i].number);
+      for (int k = 0; k < TS_COUNT; k++) {
+        CHECK_STR(track_str(&q->tracks[i], k), track_str(&p->tracks[i], k));
+      }
+    }
+  }
+  playlist_free(q);
+
+  CHECK(store_roundtrip(p, 1, 0) == NULL);
+  CHECK(store_roundtrip(p, 0, 3) == NULL);
+
+  FILE *plain = tmpfile();
+  fputs("mpzd-playlist 1\n5\tplain\tseq\t2\n1\t/m/a.flac\t0\t0\t10\tA\tA\tB\tT\t2001\t1\t0\t0\n", plain);
+  rewind(plain);
+  q = store_read_playlist(plain);
+  fclose(plain);
+  CHECK(q != NULL && q->id == 5 && q->len == 1 && q->order == ORDER_SEQ);
+  if (q && q->len == 1) {
+    CHECK_STR(track_str(&q->tracks[0], TS_PATH), "/m/a.flac");
+    CHECK(q->tracks[0].year == 2001 && q->tracks[0].dur_ms == 10);
+  }
+  playlist_free(q);
+
+  Playlist *e = playlist_new(9, "");
+  q = store_roundtrip(e, 0, 0);
+  CHECK(q != NULL && q->id == 9 && q->len == 0 && strcmp(q->name, "") == 0);
+  playlist_free(q);
+  playlist_free(e);
+  playlist_free(p);
+}
+
 int main(void) {
   snprintf(tmpdir, sizeof(tmpdir), "/tmp/mpzd-test-XXXXXX");
   const char *base = getenv("TMPDIR");
@@ -272,6 +343,7 @@ int main(void) {
   test_cue();
   test_m3u();
   test_store_roundtrip();
+  test_store_files();
 
   char cmd[600];
   snprintf(cmd, sizeof(cmd), "rm -rf '%s'", tmpdir);

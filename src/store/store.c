@@ -7,14 +7,16 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #define LOG_MODULE "store"
 #define PLAYLIST_MAGIC "mpzd-playlist 1"
+#define MAX_PLAYLIST_BYTES (256u << 20)
 #define STATE_MAGIC "mpzd-state 1"
 
 static char *store_dir;
 
-void store_escape(StrBuf *sb, const char *s) {
+static void escape(StrBuf *sb, const char *s) {
   const char *run = s;
   for (; *s; s++) {
     const char *rep = NULL;
@@ -33,7 +35,7 @@ void store_escape(StrBuf *sb, const char *s) {
   sb_append(sb, run, (size_t)(s - run));
 }
 
-void store_unescape(char *s) {
+static void unescape(char *s) {
   char *w = s;
   for (; *s; s++) {
     if (*s == '\\' && s[1]) {
@@ -61,7 +63,7 @@ static int split_tabs(char *line, char **fields, int max) {
     }
   }
   for (int i = 0; i < n; i++) {
-    store_unescape(fields[i]);
+    unescape(fields[i]);
   }
   return n;
 }
@@ -78,19 +80,19 @@ static uint32_t u32_or(const char *s, uint32_t def) {
   return parse_u32(s, &v) ? v : def;
 }
 
-bool store_write_playlist(FILE *f, const Playlist *p) {
+static bool write_tsv(FILE *f, const Playlist *p) {
   StrBuf sb = { 0 };
   sb_printf(&sb, PLAYLIST_MAGIC "\n%u\t", p->id);
-  store_escape(&sb, p->name);
+  escape(&sb, p->name);
   sb_printf(&sb, "\t%s\t%u\n", order_name(p->order), p->next_track_id);
   for (size_t i = 0; i < p->len; i++) {
     const Track *t = &p->tracks[i];
     sb_printf(&sb, "%u\t", t->id);
-    store_escape(&sb, track_str(t, TS_PATH));
+    escape(&sb, track_str(t, TS_PATH));
     sb_printf(&sb, "\t%u\t%u\t%u", t->begin_ms, t->end_ms, t->dur_ms);
     for (int s = TS_ARTIST; s < TS_COUNT; s++) {
       sb_puts(&sb, "\t");
-      store_escape(&sb, track_str(t, s));
+      escape(&sb, track_str(t, s));
     }
     sb_printf(&sb, "\t%u\t%u\t%u\t%u\n", t->year, t->number, t->disc, t->flags);
     if (sb.len > 64 * 1024) {
@@ -105,7 +107,7 @@ bool store_write_playlist(FILE *f, const Playlist *p) {
   return !ferror(f);
 }
 
-Playlist *store_read_playlist(FILE *f) {
+static Playlist *read_tsv(FILE *f) {
   char *line = NULL;
   size_t cap = 0;
   Playlist *p = NULL;
@@ -160,6 +162,88 @@ Playlist *store_read_playlist(FILE *f) {
 
 out:
   free(line);
+  return p;
+}
+
+static bool gzip(const char *src, size_t len, StrBuf *out) {
+  z_stream zs = { 0 };
+  if (deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 9, Z_DEFAULT_STRATEGY) != Z_OK) {
+    return false;
+  }
+  out->cap = deflateBound(&zs, len);
+  out->data = xrealloc(out->data, out->cap);
+  zs.next_in = (Bytef *)src;
+  zs.avail_in = (uInt)len;
+  zs.next_out = (Bytef *)out->data;
+  zs.avail_out = (uInt)out->cap;
+  int rc = deflate(&zs, Z_FINISH);
+  out->len = zs.total_out;
+  deflateEnd(&zs);
+  return rc == Z_STREAM_END;
+}
+
+static bool gunzip(const uint8_t *src, size_t len, StrBuf *out) {
+  z_stream zs = { 0 };
+  if (inflateInit2(&zs, 15 + 16) != Z_OK) {
+    return false;
+  }
+  zs.next_in = (Bytef *)src;
+  zs.avail_in = (uInt)len;
+  int rc = Z_OK;
+  while (rc == Z_OK) {
+    if (out->len == out->cap) {
+      if (out->cap >= MAX_PLAYLIST_BYTES) {
+        break;
+      }
+      out->cap = out->cap ? out->cap * 2 : 64 * 1024;
+      out->data = xrealloc(out->data, out->cap);
+    }
+    zs.next_out = (Bytef *)out->data + out->len;
+    zs.avail_out = (uInt)(out->cap - out->len);
+    rc = inflate(&zs, Z_NO_FLUSH);
+    out->len = zs.total_out;
+  }
+  inflateEnd(&zs);
+  return rc == Z_STREAM_END && zs.avail_in == 0;
+}
+
+bool store_write_playlist(FILE *f, const Playlist *p) {
+  char *tsv = NULL;
+  size_t len = 0;
+  FILE *mem = open_memstream(&tsv, &len);
+  if (!mem) {
+    return false;
+  }
+  bool ok = write_tsv(mem, p);
+  ok = fclose(mem) == 0 && ok;
+  StrBuf gz = { 0 };
+  ok = ok && gzip(tsv, len, &gz) && fwrite(gz.data, 1, gz.len, f) == gz.len;
+  free(tsv);
+  sb_free(&gz);
+  return ok && !ferror(f);
+}
+
+Playlist *store_read_playlist(FILE *f) {
+  StrBuf raw = { 0 };
+  char chunk[65536];
+  size_t n;
+  while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+    sb_append(&raw, chunk, n);
+  }
+  Playlist *p = NULL;
+  const uint8_t *b = (const uint8_t *)raw.data;
+  bool gz = raw.len >= 2 && b[0] == 0x1f && b[1] == 0x8b;
+  StrBuf tsv = { 0 };
+  if (!ferror(f) && raw.len && (!gz || gunzip(b, raw.len, &tsv))) {
+    StrBuf *src = gz ? &tsv : &raw;
+    FILE *mem = fmemopen(src->data, src->len, "r");
+    if (mem) {
+      p = read_tsv(mem);
+      fclose(mem);
+    }
+  }
+  sb_free(&raw);
+  sb_free(&tsv);
   return p;
 }
 
@@ -240,6 +324,9 @@ static bool write_state_cb(FILE *f, const void *ctx) {
   const StorePlaying *playing = ctx;
   StrBuf sb = { 0 };
   sb_printf(&sb, STATE_MAGIC "\nnext_playlist_id %u\norder %s\nfollow %d\nvolume %d\n", M.next_pl_id, order_name(M.order), M.follow ? 1 : 0, M.volume);
+  if (M.output) {
+    sb_printf(&sb, "output %s\n", M.output);
+  }
   if (M.sel_pl) {
     sb_printf(&sb, "selected %u %u\n", M.sel_pl, M.sel_track);
   }
@@ -288,18 +375,29 @@ bool store_load(StorePlaying *playing) {
     } else if (strcmp(line, "volume") == 0) {
       int v = atoi(val);
       M.volume = v < 0 ? 0 : (v > 100 ? 100 : v);
+    } else if (strcmp(line, "output") == 0) {
+      free(M.output);
+      M.output = xstrdup(val);
     } else if (strcmp(line, "selected") == 0) {
       sscanf(val, "%u %u", &M.sel_pl, &M.sel_track);
     } else if (strcmp(line, "playing") == 0) {
       playing->valid = sscanf(val, "%u %u %u", &playing->pl, &playing->track, &playing->pos_ms) == 3;
     } else if (strcmp(line, "playlist") == 0) {
       uint32_t id = u32_or(val, 0);
-      char *pl_path = path_in_store("playlists/%u.tsv", id);
+      char *pl_path = path_in_store("playlists/%u.tsv.gz", id);
       FILE *pf = fopen(pl_path, "r");
+      bool legacy = false;
+      if (!pf) {
+        free(pl_path);
+        pl_path = path_in_store("playlists/%u.tsv", id);
+        pf = fopen(pl_path, "r");
+        legacy = pf != NULL;
+      }
       if (pf) {
         Playlist *p = store_read_playlist(pf);
         fclose(pf);
         if (p && p->id == id && !model_find(id)) {
+          p->dirty = legacy;
           model_add(p);
         } else {
           LOG("skipping corrupt playlist %s", pl_path);
@@ -321,6 +419,18 @@ bool store_load(StorePlaying *playing) {
   return ok;
 }
 
+static void unlink_logged(const char *path) {
+  if (unlink(path) != 0 && errno != ENOENT) {
+    LOG("cannot remove %s: %s", path, strerror(errno));
+  }
+}
+
+static void remove_legacy(uint32_t id) {
+  char *path = path_in_store("playlists/%u.tsv", id);
+  unlink_logged(path);
+  free(path);
+}
+
 bool store_flush(const StorePlaying *playing, bool force_state) {
   bool ok = true;
   for (size_t i = 0; i < M.len; i++) {
@@ -328,9 +438,10 @@ bool store_flush(const StorePlaying *playing, bool force_state) {
     if (!p->dirty) {
       continue;
     }
-    char *path = path_in_store("playlists/%u.tsv", p->id);
+    char *path = path_in_store("playlists/%u.tsv.gz", p->id);
     if (atomic_write(path, write_playlist_cb, p)) {
       p->dirty = false;
+      remove_legacy(p->id);
     } else {
       ok = false;
     }
@@ -350,9 +461,8 @@ bool store_flush(const StorePlaying *playing, bool force_state) {
 }
 
 void store_playlist_deleted(uint32_t id) {
-  char *path = path_in_store("playlists/%u.tsv", id);
-  if (unlink(path) != 0 && errno != ENOENT) {
-    LOG("cannot remove %s: %s", path, strerror(errno));
-  }
+  char *path = path_in_store("playlists/%u.tsv.gz", id);
+  unlink_logged(path);
   free(path);
+  remove_legacy(id);
 }

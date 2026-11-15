@@ -7,6 +7,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(MPZD_ASAN "Build with AddressSanitizer and UBSan" OFF)
 option(MPZD_TESTS "Build unit tests" ON)
+option(MPZD_PIPEWIRE "List PipeWire sinks as outputs" ON)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)

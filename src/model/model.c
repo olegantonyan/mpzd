@@ -141,6 +141,7 @@ void model_free(void) {
   }
   free(M.pls);
   free(M.library);
+  free(M.output);
   memset(&M, 0, sizeof(M));
 }
 

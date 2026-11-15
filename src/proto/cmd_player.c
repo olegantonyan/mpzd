@@ -1,5 +1,6 @@
 #include "app.h"
 #include "model/model.h"
+#include "player/outputs.h"
 #include "player/player.h"
 #include "proto/handlers.h"
 #include "proto/proto.h"
@@ -25,6 +26,7 @@ static bool status(int argc, char **argv) {
     r_opt("icy", st.icy);
   }
   r_u32("volume", (uint32_t)M.volume);
+  r_str("output", M.output);
   r_str("order", order_name(M.order));
   r_u32("follow", M.follow ? 1 : 0);
   r_opt_u32("sel_playlist", M.sel_pl);
@@ -115,6 +117,34 @@ static bool volume(int argc, char **argv) {
   return true;
 }
 
+static bool outputs(int argc, char **argv) {
+  OutputList l = { 0 };
+  if (!outputs_list(&l)) {
+    output_list_free(&l);
+    return r_err(E_IO, "cannot list outputs");
+  }
+  for (size_t i = 0; i < l.len; i++) {
+    r_str("output", l.v[i].id);
+    r_str("desc", l.v[i].desc);
+    if (strcmp(l.v[i].id, M.output) == 0) {
+      r_u32("active", 1);
+    }
+  }
+  output_list_free(&l);
+  return true;
+}
+
+static bool output(int argc, char **argv) {
+  if (argc > 0) {
+    if (!outputs_valid(argv[0])) {
+      return r_err(E_NOT_FOUND, "unknown output '%s'", argv[0]);
+    }
+    player_set_output(argv[0]);
+  }
+  r_str("output", M.output);
+  return true;
+}
+
 static bool order(int argc, char **argv) {
   if (argc == 0) {
     r_str("order", order_name(M.order));
@@ -176,6 +206,8 @@ const Command cmd_player[] = {
   { "prev", prev, 0, 0 },
   { "seek", seek, 1, 1 },
   { "volume", volume, 0, 1 },
+  { "outputs", outputs, 0, 0 },
+  { "output", output, 0, 1 },
   { "order", order, 0, 1 },
   { "select", select_cmd, 1, 2 },
   { "follow", follow, 0, 1 },

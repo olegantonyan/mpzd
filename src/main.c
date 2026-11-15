@@ -5,6 +5,7 @@
 #include "model/model.h"
 #include "net/server.h"
 #include "player/audio.h"
+#include "player/outputs.h"
 #include "player/player.h"
 #include "proto/handlers.h"
 #include "proto/proto.h"
@@ -34,13 +35,14 @@ typedef struct {
   char *state_dir;
   char *max_clients;
   char *library;
+  char *audio;
 } Config;
 
 static int save_timer = -1;
 static bool save_armed;
 
 static void usage(const char *prog) {
-  printf("usage: %s [-c config] [-l library_dir] [-d state_dir] [-b bind_addr] [-p port] [-s unix_socket] [-o alsa_device]\n", prog);
+  printf("usage: %s [-c config] [-l library_dir] [-d state_dir] [-b bind_addr] [-p port] [-s unix_socket] [-a pipewire|alsa] [-o output]\n", prog);
 }
 
 static void set(char **dst, const char *v) {
@@ -66,7 +68,7 @@ static void config_free(Config *c) {
   }
 }
 
-static bool config_load(const char *path, Config *c) {
+static bool config_load(const char *path, Config *c, StrVec *outputs) {
   FILE *f = fopen(path, "r");
   if (!f) {
     fprintf(stderr, "cannot open %s: %s\n", path, strerror(errno));
@@ -96,6 +98,8 @@ static bool config_load(const char *path, Config *c) {
     else if (strcmp(key, "state_dir") == 0) set(&c->state_dir, s);
     else if (strcmp(key, "max_clients") == 0) set(&c->max_clients, s);
     else if (strcmp(key, "library") == 0) set(&c->library, s);
+    else if (strcmp(key, "audio") == 0) set(&c->audio, s);
+    else if (strcmp(key, "output") == 0) strvec_push(outputs, xstrdup(s));
     else fprintf(stderr, "%s: unknown key '%s'\n", path, key);
   }
   free(line);
@@ -173,7 +177,7 @@ int main(int argc, char **argv) {
   Config cfg = { 0 };
   const char *config_path = NULL;
   int opt;
-  while ((opt = getopt(argc, argv, "c:l:d:b:p:s:o:hV")) != -1) {
+  while ((opt = getopt(argc, argv, "c:l:d:b:p:s:a:o:hV")) != -1) {
     switch (opt) {
       case 'c': config_path = optarg; break;
       case 'l': set(&cli.library, optarg); break;
@@ -181,6 +185,7 @@ int main(int argc, char **argv) {
       case 'b': set(&cli.bind, optarg); break;
       case 'p': set(&cli.port, optarg); break;
       case 's': set(&cli.socket, optarg); break;
+      case 'a': set(&cli.audio, optarg); break;
       case 'o': set(&cli.device, optarg); break;
       case 'V': printf("mpzd %s\n", PROJECT_VERSION); return 0;
       case 'h': usage(argv[0]); return 0;
@@ -192,16 +197,37 @@ int main(int argc, char **argv) {
   set(&cfg.port, "6601");
   set(&cfg.device, "default");
   set(&cfg.max_clients, "16");
+#ifdef MPZD_PIPEWIRE
+  set(&cfg.audio, "pipewire");
+#else
+  set(&cfg.audio, "alsa");
+#endif
   char *state_dir = default_state_dir();
   set(&cfg.state_dir, state_dir);
   free(state_dir);
-  if (config_path && !config_load(config_path, &cfg)) {
+  StrVec outs = { 0 };
+  if (config_path && !config_load(config_path, &cfg, &outs)) {
     return 1;
   }
   overlay(&cfg, &cli);
   config_free(&cli);
   if (!cfg.library) {
     fprintf(stderr, "no library folder configured (-l or library)\n");
+    config_free(&cfg);
+    strvec_free(&outs);
+    return 1;
+  }
+  bool pipewire = strcmp(cfg.audio, "pipewire") == 0;
+  if (!pipewire && strcmp(cfg.audio, "alsa") != 0) {
+    fprintf(stderr, "audio must be alsa or pipewire\n");
+    config_free(&cfg);
+    strvec_free(&outs);
+    return 1;
+  }
+  bool outputs_ok = outputs_init(pipewire, &outs, cfg.device);
+  strvec_free(&outs);
+  if (!outputs_ok) {
+    fprintf(stderr, "mpzd is built without PipeWire support (-DMPZD_PIPEWIRE=ON)\n");
     config_free(&cfg);
     return 1;
   }
@@ -232,7 +258,11 @@ int main(int argc, char **argv) {
     return 1;
   }
   fix_selection();
-  LOG("mpzd %s, library %s, state %s, %zu playlists", PROJECT_VERSION, M.library, cfg.state_dir, M.len);
+  if (!M.output || !outputs_valid(M.output)) {
+    free(M.output);
+    M.output = xstrdup(cfg.device);
+  }
+  LOG("mpzd %s, library %s, output %s (%s), state %s, %zu playlists", PROJECT_VERSION, M.library, M.output, cfg.audio, cfg.state_dir, M.len);
 
   ServerConfig scfg = {
     .bind = cfg.bind,
@@ -248,7 +278,10 @@ int main(int argc, char **argv) {
   }
 
   int audio_fd, scan_fd;
-  if (!audio_init(cfg.device, &audio_fd) || !scanner_start(&scan_fd)) {
+  char *pcm = outputs_pcm(M.output);
+  bool audio_ok = audio_init(pcm, &audio_fd);
+  free(pcm);
+  if (!audio_ok || !scanner_start(&scan_fd)) {
     LOG("cannot start worker threads");
     return 1;
   }
@@ -273,6 +306,7 @@ int main(int argc, char **argv) {
   close(sig_fd);
   model_free();
   store_free();
+  outputs_free();
   config_free(&cfg);
   return 0;
 }

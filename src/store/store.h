@@ -23,7 +23,5 @@ void store_playlist_deleted(uint32_t id);
 
 bool store_write_playlist(FILE *f, const Playlist *p);
 Playlist *store_read_playlist(FILE *f);
-void store_escape(StrBuf *sb, const char *s);
-void store_unescape(char *s);
 
 #endif
