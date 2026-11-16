@@ -1,13 +1,13 @@
 #include "util/bg.h"
+#include "util/loop.h"
 #include "util/util.h"
+#include "util/wake.h"
 
+#include <sys/poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/eventfd.h>
-#include <sys/timerfd.h>
-#include <unistd.h>
 
 #define LOG_MODULE "bg"
 #define BG_MAX_THREADS 16
@@ -29,8 +29,9 @@ static struct {
   Job *jobs;
   int running;
   int efd;
-  int tfd;
-} B = { .mu = PTHREAD_MUTEX_INITIALIZER, .efd = -1, .tfd = -1 };
+  LoopFd *ev;
+  LoopTimer *timer;
+} B = { .mu = PTHREAD_MUTEX_INITIALIZER, .efd = -1 };
 
 static void unref(Job *j) {
   if (atomic_fetch_sub(&j->refs, 1) == 1) {
@@ -49,10 +50,7 @@ static void *worker(void *p) {
   pthread_mutex_unlock(&B.mu);
   unref(j);
   if (!abandoned) {
-    uint64_t one = 1;
-    if (write(B.efd, &one, sizeof(one)) < 0) {
-      LOG("eventfd write failed");
-    }
+    wake_signal(B.efd);
   }
   return NULL;
 }
@@ -66,24 +64,21 @@ static void arm_timer(void) {
     }
   }
   pthread_mutex_unlock(&B.mu);
-  struct itimerspec its = { 0 };
-  if (next) {
-    its.it_value.tv_sec = (time_t)(next / 1000);
-    its.it_value.tv_nsec = (long)(next % 1000) * 1000000L;
-  }
-  if (timerfd_settime(B.tfd, TFD_TIMER_ABSTIME, &its, NULL) != 0) {
-    LOG("timerfd_settime failed");
+  if (B.timer) {
+    loop_timer_arm(B.timer, next);
   }
 }
 
-bool bg_init(int *event_fd, int *timer_fd) {
-  B.efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-  B.tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-  if (B.efd < 0 || B.tfd < 0) {
+static void on_event(void *ud, short revents);
+static void on_timer(void *ud);
+
+bool bg_init(void) {
+  B.efd = wake_open();
+  if (B.efd < 0) {
     return false;
   }
-  *event_fd = B.efd;
-  *timer_fd = B.tfd;
+  B.ev = loop_add_fd(B.efd, POLLIN, on_event, NULL);
+  B.timer = loop_timer_new(on_timer, NULL);
   return true;
 }
 
@@ -159,22 +154,13 @@ static void deliver(Job *list, bool timed_out) {
   }
 }
 
-void bg_on_event(void *ud) {
-  (void)ud;
-  uint64_t v;
-  if (read(B.efd, &v, sizeof(v)) < 0) {
-    v = 0;
-  }
+static void on_event(void *ud, short revents) {
+  wake_drain(B.efd);
   deliver(take(false, 0), false);
   arm_timer();
 }
 
-void bg_on_timer(void *ud) {
-  (void)ud;
-  uint64_t v;
-  if (read(B.tfd, &v, sizeof(v)) < 0) {
-    v = 0;
-  }
+static void on_timer(void *ud) {
   deliver(take(true, mono_ms()), true);
   arm_timer();
 }
@@ -182,11 +168,10 @@ void bg_on_timer(void *ud) {
 void bg_shutdown(void) {
   deliver(take(true, UINT64_MAX), true);
   deliver(take(false, 0), false);
-  if (B.efd >= 0) {
-    close(B.efd);
-  }
-  if (B.tfd >= 0) {
-    close(B.tfd);
-  }
-  B.efd = B.tfd = -1;
+  loop_del(B.ev);
+  loop_timer_free(B.timer);
+  wake_close(B.efd);
+  B.ev = NULL;
+  B.timer = NULL;
+  B.efd = -1;
 }

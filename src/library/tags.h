@@ -6,7 +6,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-void tags_init(void);
 bool tags_read(const char *path, Track *out);
 uint32_t tags_duration_ms(const char *path);
 

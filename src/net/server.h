@@ -8,21 +8,17 @@
 
 typedef struct Client Client;
 typedef void (*LineHandler)(Client *c, char *line);
-typedef void (*FdHandler)(void *ud);
 
 typedef struct {
   const char *bind;
   const char *port;
-  const char *socket_path;
   const char *greeting;
   int max_clients;
   size_t max_output;
 } ServerConfig;
 
 bool server_init(const ServerConfig *cfg, LineHandler on_line);
-bool server_add_fd(int fd, FdHandler cb, void *ud);
-void server_run(void);
-void server_stop(void);
+bool server_listen_fd(int fd, bool tcp);
 void server_shutdown(void);
 
 void client_send(Client *c, const char *data, size_t n);

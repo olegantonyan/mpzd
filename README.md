@@ -22,6 +22,20 @@ On embedded targets you can use a smaller FFmpeg build, for example:
 ./configure --disable-everything --disable-programs --disable-doc --disable-avdevice --disable-avfilter --disable-swscale --enable-swresample --enable-protocol=file,http,https --enable-demuxer=flac,mp3,ogg,mov,wav,aiff,ape,wv,matroska,aac,asf,dsf,tta,mpc,mpc8 --enable-parser=flac,mpegaudio,vorbis,opus,aac --enable-decoder=flac,mp3,mp3float,vorbis,opus,aac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_s16be,pcm_s24be,ape,wavpack,wmav2,wmalossless,dsd_lsbf,dsd_msbf,tta,mpc7,mpc8
 ```
 
+## Porting
+
+`src/` except `src/linux/` is portable C (pthreads, POSIX files, BSD sockets, `poll`); `src/core.cmake` lists its sources. A platform implements these headers:
+
+| Header | Linux |
+|---|---|
+| `player/decoder.h` | `linux/decoder_ffmpeg.c` |
+| `player/sink.h` | `linux/sink_alsa.c` |
+| `library/tags.h` | `linux/tags_ffmpeg.c` |
+| `player/outputs.h` (`outputs_list`, `outputs_valid`, `outputs_pcm`) | `linux/outputs.c` |
+| `util/wake.h` | `linux/wake.c` (eventfd) |
+
+and a `main` that wires them to `util/loop.h`, as `linux/main.c` does. ESP-IDF builds the core with `_GNU_SOURCE`, `LWIP_NETDB_HAS_GAI_STRERROR=1` plus a `gai_strerror()`, and the `espressif/zlib` component.
+
 ## Run
 
 ```

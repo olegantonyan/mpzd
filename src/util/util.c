@@ -225,3 +225,22 @@ uint64_t mono_ms(void) {
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
+
+bool join_within(pthread_t t, pthread_mutex_t *mu, pthread_cond_t *cv, const bool *done, unsigned sec) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += sec;
+  pthread_mutex_lock(mu);
+  int rc = 0;
+  while (!*done && rc != ETIMEDOUT) {
+    rc = pthread_cond_timedwait(cv, mu, &ts);
+  }
+  bool ok = *done;
+  pthread_mutex_unlock(mu);
+  if (ok) {
+    pthread_join(t, NULL);
+  } else {
+    pthread_detach(t);
+  }
+  return ok;
+}

@@ -5,6 +5,7 @@
 #include "proto/handlers.h"
 #include "proto/proto.h"
 
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -46,7 +47,7 @@ static bool play(int argc, char **argv) {
   }
   Playlist *p = model_find(pl_id);
   if (!p) {
-    return r_err(E_NOT_FOUND, "no playlist %u", pl_id);
+    return r_err(E_NOT_FOUND, "no playlist %" PRIu32, pl_id);
   }
   uint32_t track;
   if (argc > 1) {
@@ -58,7 +59,7 @@ static bool play(int argc, char **argv) {
   } else {
     return r_err(E_STATE, "playlist is empty");
   }
-  return player_play((TrackRef){ pl_id, track }) || r_err(E_NOT_FOUND, "no track %u", track);
+  return player_play((TrackRef){ pl_id, track }) || r_err(E_NOT_FOUND, "no track %" PRIu32, track);
 }
 
 static bool pause_cmd(int argc, char **argv) {
@@ -210,10 +211,10 @@ static bool select_cmd(int argc, char **argv) {
   }
   Playlist *p = model_find(pl_id);
   if (!p) {
-    return r_err(E_NOT_FOUND, "no playlist %u", pl_id);
+    return r_err(E_NOT_FOUND, "no playlist %" PRIu32, pl_id);
   }
   if (track && playlist_index(p, track) < 0) {
-    return r_err(E_NOT_FOUND, "no track %u", track);
+    return r_err(E_NOT_FOUND, "no track %" PRIu32, track);
   }
   player_select((TrackRef){ pl_id, track });
   return true;

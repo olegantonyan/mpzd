@@ -24,7 +24,7 @@ typedef struct {
 
 void player_watchdog(void);
 void player_init(const StorePlaying *resume);
-void player_on_audio(void *ud);
+void player_on_audio(void *ud, short revents);
 void player_status(PlayerStatus *st);
 StorePlaying player_store_state(void);
 

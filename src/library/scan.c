@@ -3,15 +3,15 @@
 #include "library/m3u.h"
 #include "library/tags.h"
 #include "model/sort.h"
+#include "util/wake.h"
 
 #include <dirent.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/eventfd.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #define LOG_MODULE "scan"
 #define STALL_MS 30000
@@ -179,6 +179,7 @@ static struct {
   int efd;
   bool quit;
   bool running;
+  bool exited;
   unsigned gen;
   ScanJob *current;
   uint64_t progress_at;
@@ -200,10 +201,7 @@ static void push_done(ScanJob *job) {
     S.done_head = job;
   }
   S.done_tail = job;
-  uint64_t one = 1;
-  if (write(S.efd, &one, sizeof(one)) < 0) {
-    LOG("eventfd write failed");
-  }
+  wake_signal(S.efd);
 }
 
 static void run_job(ScanJob *job) {
@@ -244,6 +242,10 @@ static void *worker(void *arg) {
     S.current = NULL;
     push_done(job);
   }
+  if (gen == S.gen) {
+    S.exited = true;
+    pthread_cond_broadcast(&S.cv);
+  }
   pthread_mutex_unlock(&S.mu);
   return NULL;
 }
@@ -259,7 +261,7 @@ void scanner_watchdog(void) {
     return;
   }
   ScanJob *stuck = S.current;
-  LOG("scan of playlist %u stalled on %s, abandoned", stuck->pl_id, S.where);
+  LOG("scan of playlist %" PRIu32 " stalled on %s, abandoned", stuck->pl_id, S.where);
   ScanJob *job = xcalloc(1, sizeof(*job));
   job->kind = stuck->kind;
   job->pl_id = stuck->pl_id;
@@ -277,12 +279,12 @@ void scanner_watchdog(void) {
 }
 
 bool scanner_start(int *event_fd) {
-  S.efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  S.efd = wake_open();
   if (S.efd < 0) {
     return false;
   }
   if (!spawn()) {
-    close(S.efd);
+    wake_close(S.efd);
     return false;
   }
   S.running = true;
@@ -299,14 +301,10 @@ void scanner_stop(void) {
   pthread_cond_broadcast(&S.cv);
   pthread_mutex_unlock(&S.mu);
   S.running = false;
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  ts.tv_sec += JOIN_TIMEOUT_SEC;
-  if (pthread_timedjoin_np(S.thread, NULL, &ts) != 0) {
+  if (!join_within(S.thread, &S.mu, &S.cv, &S.exited, JOIN_TIMEOUT_SEC)) {
     pthread_mutex_lock(&S.mu);
     LOG("scanner stuck on %s, not waiting for it", S.where);
     pthread_mutex_unlock(&S.mu);
-    pthread_detach(S.thread);
     return;
   }
   for (ScanJob *j = S.todo_head; j;) {
@@ -320,7 +318,7 @@ void scanner_stop(void) {
     j = next;
   }
   S.todo_head = S.todo_tail = S.done_head = S.done_tail = NULL;
-  close(S.efd);
+  wake_close(S.efd);
   S.efd = -1;
 }
 
@@ -344,10 +342,7 @@ void scanner_submit(ScanJob *job) {
 }
 
 ScanJob *scanner_take_done(void) {
-  uint64_t v;
-  if (read(S.efd, &v, sizeof(v)) < 0) {
-    v = 0;
-  }
+  wake_drain(S.efd);
   pthread_mutex_lock(&S.mu);
   ScanJob *list = S.done_head;
   S.done_head = S.done_tail = NULL;

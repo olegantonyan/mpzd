@@ -1,6 +1,7 @@
 #include "store/store.h"
 #include "util/util.h"
 
+#include <inttypes.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -107,14 +108,14 @@ static uint32_t u32_or(const char *s, uint32_t def) {
 
 static bool write_tsv(FILE *f, const Playlist *p) {
   StrBuf sb = { 0 };
-  sb_printf(&sb, PLAYLIST_MAGIC "\n%u\t", p->id);
+  sb_printf(&sb, PLAYLIST_MAGIC "\n%" PRIu32 "\t", p->id);
   escape(&sb, p->name);
-  sb_printf(&sb, "\t%s\t%u\n", order_name(p->order), p->next_track_id);
+  sb_printf(&sb, "\t%s\t%" PRIu32 "\n", order_name(p->order), p->next_track_id);
   for (size_t i = 0; i < p->len; i++) {
     const Track *t = &p->tracks[i];
-    sb_printf(&sb, "%u\t", t->id);
+    sb_printf(&sb, "%" PRIu32 "\t", t->id);
     escape(&sb, track_str(t, TS_PATH));
-    sb_printf(&sb, "\t%u\t%u\t%u", t->begin_ms, t->end_ms, t->dur_ms);
+    sb_printf(&sb, "\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu32, t->begin_ms, t->end_ms, t->dur_ms);
     for (int s = TS_ARTIST; s < TS_COUNT; s++) {
       sb_puts(&sb, "\t");
       escape(&sb, track_str(t, s));
@@ -462,18 +463,18 @@ static void enqueue(char *path, char *data, size_t len, bool gz, char *also_unli
 
 static char *state_text(const StorePlaying *playing, size_t *len) {
   StrBuf sb = { 0 };
-  sb_printf(&sb, STATE_MAGIC "\nnext_playlist_id %u\norder %s\nfollow %d\nvolume %d\n", M.next_pl_id, order_name(M.order), M.follow ? 1 : 0, M.volume);
+  sb_printf(&sb, STATE_MAGIC "\nnext_playlist_id %" PRIu32 "\norder %s\nfollow %d\nvolume %d\n", M.next_pl_id, order_name(M.order), M.follow ? 1 : 0, M.volume);
   if (M.output) {
     sb_printf(&sb, "output %s\n", M.output);
   }
   if (M.sel_pl) {
-    sb_printf(&sb, "selected %u %u\n", M.sel_pl, M.sel_track);
+    sb_printf(&sb, "selected %" PRIu32 " %" PRIu32 "\n", M.sel_pl, M.sel_track);
   }
   if (playing && playing->valid) {
-    sb_printf(&sb, "playing %u %u %u\n", playing->pl, playing->track, playing->pos_ms);
+    sb_printf(&sb, "playing %" PRIu32 " %" PRIu32 " %" PRIu32 "\n", playing->pl, playing->track, playing->pos_ms);
   }
   for (size_t i = 0; i < M.len; i++) {
-    sb_printf(&sb, "playlist %u\n", M.pls[i]->id);
+    sb_printf(&sb, "playlist %" PRIu32 "\n", M.pls[i]->id);
   }
   *len = sb.len;
   return sb.data;
@@ -517,17 +518,17 @@ bool store_load(StorePlaying *playing) {
       free(M.output);
       M.output = xstrdup(val);
     } else if (strcmp(line, "selected") == 0) {
-      sscanf(val, "%u %u", &M.sel_pl, &M.sel_track);
+      sscanf(val, "%" SCNu32 " %" SCNu32, &M.sel_pl, &M.sel_track);
     } else if (strcmp(line, "playing") == 0) {
-      playing->valid = sscanf(val, "%u %u %u", &playing->pl, &playing->track, &playing->pos_ms) == 3;
+      playing->valid = sscanf(val, "%" SCNu32 " %" SCNu32 " %" SCNu32, &playing->pl, &playing->track, &playing->pos_ms) == 3;
     } else if (strcmp(line, "playlist") == 0) {
       uint32_t id = u32_or(val, 0);
-      char *pl_path = path_in_store("playlists/%u.tsv.gz", id);
+      char *pl_path = path_in_store("playlists/%" PRIu32 ".tsv.gz", id);
       FILE *pf = fopen(pl_path, "r");
       bool legacy = false;
       if (!pf) {
         free(pl_path);
-        pl_path = path_in_store("playlists/%u.tsv", id);
+        pl_path = path_in_store("playlists/%" PRIu32 ".tsv", id);
         pf = fopen(pl_path, "r");
         legacy = pf != NULL;
       }
@@ -570,12 +571,12 @@ bool store_flush(const StorePlaying *playing, bool force_state) {
     bool written = mem && write_tsv(mem, p);
     written = mem && fclose(mem) == 0 && written;
     if (!written) {
-      LOG("cannot serialize playlist %u", p->id);
+      LOG("cannot serialize playlist %" PRIu32, p->id);
       free(tsv);
       ok = false;
       continue;
     }
-    enqueue(path_in_store("playlists/%u.tsv.gz", p->id), tsv, len, true, path_in_store("playlists/%u.tsv", p->id));
+    enqueue(path_in_store("playlists/%" PRIu32 ".tsv.gz", p->id), tsv, len, true, path_in_store("playlists/%" PRIu32 ".tsv", p->id));
     p->dirty = false;
   }
   if (M.dirty || M.list_dirty || force_state) {
@@ -589,8 +590,8 @@ bool store_flush(const StorePlaying *playing, bool force_state) {
 }
 
 void store_playlist_deleted(uint32_t id) {
-  enqueue(path_in_store("playlists/%u.tsv.gz", id), NULL, 0, false, NULL);
-  enqueue(path_in_store("playlists/%u.tsv", id), NULL, 0, false, NULL);
+  enqueue(path_in_store("playlists/%" PRIu32 ".tsv.gz", id), NULL, 0, false, NULL);
+  enqueue(path_in_store("playlists/%" PRIu32 ".tsv", id), NULL, 0, false, NULL);
 }
 
 bool store_shutdown(unsigned timeout_ms) {

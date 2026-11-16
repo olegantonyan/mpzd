@@ -276,8 +276,7 @@ static void on_output_error(const AudioEvent *ev) {
   changed();
 }
 
-void player_on_audio(void *ud) {
-  (void)ud;
+void player_on_audio(void *ud, short revents) {
   audio_ack_events();
   AudioEvent ev;
   while (audio_poll_event(&ev)) {

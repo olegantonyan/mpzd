@@ -1,4 +1,4 @@
-#include "player/pw_sinks.h"
+#include "linux/pw_sinks.h"
 
 #include <pipewire/pipewire.h>
 #include <string.h>

@@ -6,10 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-void tags_init(void) {
-  av_log_set_level(AV_LOG_QUIET);
-}
-
 static const char *meta(const AVFormatContext *fmt, const AVStream *st, const char *key) {
   const AVDictionaryEntry *e = av_dict_get(fmt->metadata, key, NULL, 0);
   if (!e && st) {

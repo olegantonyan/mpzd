@@ -1,38 +1,31 @@
 #include "net/server.h"
+#include "util/loop.h"
 #include "util/util.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/poll.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/epoll.h>
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 #define LOG_MODULE "server"
-#define MAX_EVENTS 32
 #define MAX_LISTENERS 8
 
-typedef enum { H_LISTEN, H_CLIENT, H_FD } HandleType;
-
 typedef struct {
-  HandleType type;
   int fd;
   bool tcp;
-} Handle;
-
-typedef struct {
-  Handle h;
-  FdHandler cb;
-  void *ud;
-} ExtFd;
+  LoopFd *lh;
+} Listener;
 
 struct Client {
-  Handle h;
+  int fd;
+  LoopFd *lh;
   char in[SERVER_LINE_MAX + 1];
   size_t inlen;
   bool discarding;
@@ -46,39 +39,32 @@ struct Client {
 };
 
 static struct {
-  int epfd;
   ServerConfig cfg;
   LineHandler on_line;
-  Handle listeners[MAX_LISTENERS];
+  Listener listeners[MAX_LISTENERS];
   int nlisteners;
-  ExtFd *ext[8];
-  int next_ext;
   Client *clients;
   int nclients;
   StrVec events;
-  bool stop;
-} SV = { .epfd = -1 };
+} SV;
 
-static bool epoll_add(int fd, uint32_t events, void *ptr) {
-  struct epoll_event ev = { .events = events, .data.ptr = ptr };
-  return epoll_ctl(SV.epfd, EPOLL_CTL_ADD, fd, &ev) == 0;
+static bool set_nonblock(int fd) {
+  int fl = fcntl(fd, F_GETFL, 0);
+  return fl >= 0 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0;
 }
 
-static void epoll_mod(int fd, uint32_t events, void *ptr) {
-  struct epoll_event ev = { .events = events, .data.ptr = ptr };
-  epoll_ctl(SV.epfd, EPOLL_CTL_MOD, fd, &ev);
-}
+static void accept_clients(void *ud, short revents);
 
-static bool add_listener(int fd, bool tcp) {
-  if (SV.nlisteners >= MAX_LISTENERS || listen(fd, 16) != 0) {
+bool server_listen_fd(int fd, bool tcp) {
+  if (SV.nlisteners >= MAX_LISTENERS || !set_nonblock(fd) || listen(fd, 16) != 0) {
     close(fd);
     return false;
   }
-  Handle *h = &SV.listeners[SV.nlisteners++];
-  h->type = H_LISTEN;
-  h->fd = fd;
-  h->tcp = tcp;
-  return epoll_add(fd, EPOLLIN, h);
+  Listener *l = &SV.listeners[SV.nlisteners++];
+  l->fd = fd;
+  l->tcp = tcp;
+  l->lh = loop_add_fd(fd, POLLIN, accept_clients, l);
+  return true;
 }
 
 static bool listen_tcp(const char *host, const char *port) {
@@ -91,7 +77,7 @@ static bool listen_tcp(const char *host, const char *port) {
   }
   bool any = false;
   for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-    int fd = socket(ai->ai_family, ai->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC, ai->ai_protocol);
+    int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (fd < 0) {
       continue;
     }
@@ -105,7 +91,7 @@ static bool listen_tcp(const char *host, const char *port) {
       close(fd);
       continue;
     }
-    if (add_listener(fd, true)) {
+    if (server_listen_fd(fd, true)) {
       any = true;
     }
   }
@@ -116,61 +102,18 @@ static bool listen_tcp(const char *host, const char *port) {
   return any;
 }
 
-static bool listen_unix(const char *path) {
-  struct sockaddr_un addr = { .sun_family = AF_UNIX };
-  if (strlen(path) >= sizeof(addr.sun_path)) {
-    LOG("socket path too long: %s", path);
-    return false;
-  }
-  strcpy(addr.sun_path, path);
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-  if (fd < 0) {
-    return false;
-  }
-  unlink(path);
-  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-    LOG("bind %s: %s", path, strerror(errno));
-    close(fd);
-    return false;
-  }
-  LOG("listening on %s", path);
-  return add_listener(fd, false);
-}
+static void reap_clients(void);
 
 bool server_init(const ServerConfig *cfg, LineHandler on_line) {
   SV.cfg = *cfg;
   SV.on_line = on_line;
-  SV.epfd = epoll_create1(EPOLL_CLOEXEC);
-  if (SV.epfd < 0) {
-    LOG("epoll_create1: %s", strerror(errno));
-    return false;
-  }
-  bool ok = false;
-  if (cfg->port && *cfg->port) {
-    ok = listen_tcp(cfg->bind && *cfg->bind ? cfg->bind : NULL, cfg->port) || ok;
-  }
-  if (cfg->socket_path && *cfg->socket_path) {
-    ok = listen_unix(cfg->socket_path) || ok;
-  }
-  return ok;
-}
-
-bool server_add_fd(int fd, FdHandler cb, void *ud) {
-  if (SV.next_ext >= (int)ARRAY_LEN(SV.ext)) {
-    return false;
-  }
-  ExtFd *e = xcalloc(1, sizeof(*e));
-  e->h.type = H_FD;
-  e->h.fd = fd;
-  e->cb = cb;
-  e->ud = ud;
-  SV.ext[SV.next_ext++] = e;
-  return epoll_add(fd, EPOLLIN, e);
+  loop_set_hooks(server_flush_events, reap_clients);
+  return cfg->port && *cfg->port && listen_tcp(cfg->bind && *cfg->bind ? cfg->bind : NULL, cfg->port);
 }
 
 static void client_free(Client *c) {
-  epoll_ctl(SV.epfd, EPOLL_CTL_DEL, c->h.fd, NULL);
-  close(c->h.fd);
+  loop_del(c->lh);
+  close(c->fd);
   sb_free(&c->out);
   free(c);
 }
@@ -191,13 +134,13 @@ static void reap_clients(void) {
 
 static void update_interest(Client *c) {
   if (!c->dead) {
-    epoll_mod(c->h.fd, (c->held ? 0 : EPOLLIN) | (c->want_out ? EPOLLOUT : 0), c);
+    loop_mod(c->lh, (short)((c->held ? 0 : POLLIN) | (c->want_out ? POLLOUT : 0)));
   }
 }
 
 static void client_flush(Client *c) {
   while (c->out.len && !c->dead) {
-    ssize_t n = send(c->h.fd, c->out.data, c->out.len, MSG_NOSIGNAL);
+    ssize_t n = send(c->fd, c->out.data, c->out.len, MSG_NOSIGNAL);
     if (n > 0) {
       sb_consume(&c->out, (size_t)n);
     } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -221,7 +164,7 @@ void client_send(Client *c, const char *data, size_t n) {
   }
   sb_append(&c->out, data, n);
   if (c->out.len > SV.cfg.max_output) {
-    LOG("client %d output overflow, disconnecting", c->h.fd);
+    LOG("client %d output overflow, disconnecting", c->fd);
     c->dead = true;
     return;
   }
@@ -300,15 +243,22 @@ void server_flush_events(void) {
 
 static void set_keepalive(int fd) {
   int one = 1, idle = 15, intvl = 5, cnt = 3;
+  bool ok = setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one)) == 0 && setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) == 0 && setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl)) == 0 && setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt)) == 0;
+#ifdef TCP_USER_TIMEOUT
   unsigned user_timeout = 30000;
-  if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one)) != 0 || setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) != 0 || setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl)) != 0 || setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt)) != 0 || setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout, sizeof(user_timeout)) != 0) {
+  ok = ok && setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout, sizeof(user_timeout)) == 0;
+#endif
+  if (!ok) {
     LOG("keepalive: %s", strerror(errno));
   }
 }
 
-static void accept_clients(Handle *l) {
+static void on_client(void *ud, short revents);
+
+static void accept_clients(void *ud, short revents) {
+  Listener *l = ud;
   for (;;) {
-    int fd = accept4(l->fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    int fd = accept(l->fd, NULL, NULL);
     if (fd < 0) {
       if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         LOG("accept: %s", strerror(errno));
@@ -323,17 +273,16 @@ static void accept_clients(Handle *l) {
       close(fd);
       continue;
     }
+    if (!set_nonblock(fd)) {
+      close(fd);
+      continue;
+    }
     if (l->tcp) {
       set_keepalive(fd);
     }
     Client *c = xcalloc(1, sizeof(*c));
-    c->h.type = H_CLIENT;
-    c->h.fd = fd;
-    if (!epoll_add(fd, EPOLLIN, c)) {
-      close(fd);
-      free(c);
-      continue;
-    }
+    c->fd = fd;
+    c->lh = loop_add_fd(fd, POLLIN, on_client, c);
     c->next = SV.clients;
     SV.clients = c;
     SV.nclients++;
@@ -378,7 +327,7 @@ static void process_lines(Client *c) {
 }
 
 static void read_client(Client *c) {
-  ssize_t n = recv(c->h.fd, c->in + c->inlen, SERVER_LINE_MAX - c->inlen, 0);
+  ssize_t n = recv(c->fd, c->in + c->inlen, SERVER_LINE_MAX - c->inlen, 0);
   if (n == 0) {
     c->dead = true;
     return;
@@ -393,54 +342,21 @@ static void read_client(Client *c) {
   process_lines(c);
 }
 
-void server_run(void) {
-  struct epoll_event events[MAX_EVENTS];
-  while (!SV.stop) {
-    int n = epoll_wait(SV.epfd, events, MAX_EVENTS, -1);
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      LOG("epoll_wait: %s", strerror(errno));
-      break;
-    }
-    for (int i = 0; i < n; i++) {
-      Handle *h = events[i].data.ptr;
-      switch (h->type) {
-        case H_LISTEN:
-          accept_clients(h);
-          break;
-        case H_FD: {
-          ExtFd *e = (ExtFd *)h;
-          e->cb(e->ud);
-          break;
-        }
-        case H_CLIENT: {
-          Client *c = (Client *)h;
-          if (c->dead) {
-            break;
-          }
-          if (events[i].events & (EPOLLERR | EPOLLHUP)) {
-            c->dead = true;
-            break;
-          }
-          if (events[i].events & EPOLLOUT) {
-            client_flush(c);
-          }
-          if (events[i].events & EPOLLIN) {
-            read_client(c);
-          }
-          break;
-        }
-      }
-      server_flush_events();
-    }
-    reap_clients();
+static void on_client(void *ud, short revents) {
+  Client *c = ud;
+  if (c->dead) {
+    return;
   }
-}
-
-void server_stop(void) {
-  SV.stop = true;
+  if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
+    c->dead = true;
+    return;
+  }
+  if (revents & POLLOUT) {
+    client_flush(c);
+  }
+  if (revents & POLLIN) {
+    read_client(c);
+  }
 }
 
 void server_shutdown(void) {
@@ -450,19 +366,9 @@ void server_shutdown(void) {
   }
   reap_clients();
   for (int i = 0; i < SV.nlisteners; i++) {
+    loop_del(SV.listeners[i].lh);
     close(SV.listeners[i].fd);
   }
   SV.nlisteners = 0;
-  if (SV.cfg.socket_path && *SV.cfg.socket_path) {
-    unlink(SV.cfg.socket_path);
-  }
-  for (int i = 0; i < SV.next_ext; i++) {
-    free(SV.ext[i]);
-  }
-  SV.next_ext = 0;
   strvec_free(&SV.events);
-  if (SV.epfd >= 0) {
-    close(SV.epfd);
-    SV.epfd = -1;
-  }
 }

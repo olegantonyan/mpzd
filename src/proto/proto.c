@@ -2,6 +2,7 @@
 #include "util/bg.h"
 #include "util/util.h"
 
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -114,7 +115,7 @@ void r_opt(const char *key, const char *value) {
 }
 
 void r_u32(const char *key, uint32_t value) {
-  sb_printf(&R.reply, "%s: %u\n", key, value);
+  sb_printf(&R.reply, "%s: %" PRIu32 "\n", key, value);
 }
 
 void r_opt_u32(const char *key, uint32_t value) {

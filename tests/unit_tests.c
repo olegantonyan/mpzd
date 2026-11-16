@@ -5,6 +5,7 @@
 #include "proto/proto.h"
 #include "store/store.h"
 #include "util/bg.h"
+#include "util/loop.h"
 #include "util/util.h"
 
 #include <poll.h>
@@ -363,30 +364,21 @@ static BgTest *bgt(unsigned sleep_ms) {
   return t;
 }
 
-static void bg_pump(int efd, int tfd, int want_done, unsigned max_ms) {
+static void bg_pump(int want_done, unsigned max_ms) {
   uint64_t until = mono_ms() + max_ms;
   while (bg_done_calls < want_done && mono_ms() < until) {
-    struct pollfd fds[2] = { { .fd = efd, .events = POLLIN }, { .fd = tfd, .events = POLLIN } };
-    if (poll(fds, 2, 50) > 0) {
-      if (fds[0].revents & POLLIN) {
-        bg_on_event(NULL);
-      }
-      if (fds[1].revents & POLLIN) {
-        bg_on_timer(NULL);
-      }
-    }
+    loop_run_once(50);
   }
 }
 
 static void test_bg(void) {
-  int efd, tfd;
-  CHECK(bg_init(&efd, &tfd));
+  CHECK(bg_init());
   CHECK(bg_run(bgt(10), bgt_work, bgt_done, bgt_free, 1000));
-  bg_pump(efd, tfd, 1, 2000);
+  bg_pump(1, 2000);
   CHECK(bg_done_calls == 1 && bg_timeouts == 0 && atomic_load(&bg_frees) == 1);
 
   CHECK(bg_run(bgt(400), bgt_work, bgt_done, bgt_free, 50));
-  bg_pump(efd, tfd, 2, 2000);
+  bg_pump(2, 2000);
   CHECK(bg_done_calls == 2 && bg_timeouts == 1 && atomic_load(&bg_frees) == 1);
   usleep(600 * 1000);
   CHECK(atomic_load(&bg_frees) == 2);
@@ -401,14 +393,72 @@ static void test_bg(void) {
     }
   }
   CHECK(started == 16);
-  bg_pump(efd, tfd, 2 + started, 2000);
+  bg_pump(2 + started, 2000);
   CHECK(bg_done_calls == 2 + started && bg_timeouts == 1 + started);
   usleep(500 * 1000);
   CHECK(atomic_load(&bg_frees) == 2 + started);
   CHECK(bg_run(bgt(0), bgt_work, bgt_done, bgt_free, 1000));
-  bg_pump(efd, tfd, 3 + started, 2000);
+  bg_pump(3 + started, 2000);
   CHECK(bg_done_calls == 3 + started);
   bg_shutdown();
+  loop_free();
+}
+
+static int loop_trace[8];
+static int loop_ntrace;
+static LoopFd *loop_victim;
+
+static void loop_on_timer(void *ud) {
+  loop_trace[loop_ntrace++] = (int)(intptr_t)ud;
+}
+
+static void loop_on_fd(void *ud, short revents) {
+  int *fds = ud;
+  char c;
+  CHECK(read(fds[0], &c, 1) == 1 && (revents & POLLIN));
+  loop_trace[loop_ntrace++] = c;
+  loop_del(loop_victim);
+}
+
+static void loop_on_victim(void *ud, short revents) {
+  loop_trace[loop_ntrace++] = 'X';
+}
+
+static void test_loop(void) {
+  int a[2], b[2];
+  CHECK(pipe(a) == 0 && pipe(b) == 0);
+  LoopTimer *t1 = loop_timer_new(loop_on_timer, (void *)1);
+  LoopTimer *t2 = loop_timer_new(loop_on_timer, (void *)2);
+  uint64_t now = mono_ms();
+  loop_timer_arm(t2, now + 40);
+  loop_timer_arm(t1, now + 10);
+  uint64_t until = now + 1000;
+  while (loop_ntrace < 2 && mono_ms() < until) {
+    loop_run_once(-1);
+  }
+  CHECK(loop_ntrace == 2 && loop_trace[0] == 1 && loop_trace[1] == 2);
+  CHECK(mono_ms() - now >= 40);
+
+  loop_ntrace = 0;
+  loop_victim = loop_add_fd(b[0], POLLIN, loop_on_victim, NULL);
+  LoopFd *h = loop_add_fd(a[0], POLLIN, loop_on_fd, a);
+  CHECK(write(b[1], "y", 1) == 1 && write(a[1], "x", 1) == 1);
+  loop_run_once(100);
+  loop_run_once(0);
+  CHECK(loop_ntrace == 1 && loop_trace[0] == 'x');
+
+  loop_mod(h, 0);
+  CHECK(write(a[1], "z", 1) == 1);
+  loop_run_once(20);
+  CHECK(loop_ntrace == 1);
+
+  loop_timer_free(t1);
+  loop_timer_free(t2);
+  loop_free();
+  close(a[0]);
+  close(a[1]);
+  close(b[0]);
+  close(b[1]);
 }
 
 static Playlist *read_back(const char *dir, uint32_t id) {
@@ -488,6 +538,7 @@ int main(void) {
   test_store_roundtrip();
   test_store_files();
   test_bg();
+  test_loop();
   test_store_writer();
 
   char cmd[600];

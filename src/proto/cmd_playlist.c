@@ -9,13 +9,14 @@
 #include "store/store.h"
 #include "util/util.h"
 
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define DEFAULT_PAGE 1000
 
 static void playlist_changed(Playlist *p) {
-  server_event("playlist %u", p->id);
+  server_event("playlist %" PRIu32, p->id);
   app_changed();
 }
 
@@ -31,7 +32,7 @@ static Playlist *arg_playlist(const char *s) {
   }
   Playlist *p = model_find(id);
   if (!p) {
-    r_err(E_NOT_FOUND, "no playlist %u", id);
+    r_err(E_NOT_FOUND, "no playlist %" PRIu32, id);
   }
   return p;
 }
@@ -150,8 +151,7 @@ static void apply_job(Playlist *p, ScanJob *job) {
   player_sync_hint(p->id);
 }
 
-void scan_on_done(void *ud) {
-  (void)ud;
+void scan_on_done(void *ud, short revents) {
   ScanJob *job = scanner_take_done();
   while (job) {
     ScanJob *next = job->next;
@@ -160,7 +160,7 @@ void scan_on_done(void *ud) {
       apply_job(p, job);
       p->scanning--;
       playlist_changed(p);
-      server_notify("scan %u done", p->id);
+      server_notify("scan %" PRIu32 " done", p->id);
     }
     scanjob_free(job);
     job = next;
@@ -225,7 +225,7 @@ static void pl_add_done(void *arg, bool timed_out) {
     if (p) {
       submit(p, SCAN_ADD, job->at, &job->paths, NULL);
     } else {
-      r_err(E_NOT_FOUND, "no playlist %u", job->pl);
+      r_err(E_NOT_FOUND, "no playlist %" PRIu32, job->pl);
     }
   }
   r_finish(job->d, true);
@@ -279,7 +279,7 @@ static bool pl_track(int argc, char **argv) {
   }
   ssize_t idx = playlist_index(p, id);
   if (idx < 0) {
-    return r_err(E_NOT_FOUND, "no track %u", id);
+    return r_err(E_NOT_FOUND, "no track %" PRIu32, id);
   }
   r_u32("pos", (uint32_t)idx);
   r_track(&p->tracks[idx]);

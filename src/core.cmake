@@ -1,0 +1,23 @@
+set(MPZD_CORE_SOURCES
+  app.c
+  util/util.c
+  util/bg.c
+  util/loop.c
+  model/track.c
+  model/model.c
+  model/sort.c
+  library/library.c
+  library/cue.c
+  library/m3u.c
+  library/scan.c
+  store/store.c
+  net/server.c
+  proto/proto.c
+  proto/cmd_meta.c
+  proto/cmd_library.c
+  proto/cmd_playlist.c
+  proto/cmd_player.c
+  player/audio.c
+  player/outputs_list.c
+  player/player.c
+)

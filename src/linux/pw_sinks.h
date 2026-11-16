@@ -1,5 +1,5 @@
-#ifndef PLAYER_PW_SINKS_H
-#define PLAYER_PW_SINKS_H
+#ifndef LINUX_PW_SINKS_H
+#define LINUX_PW_SINKS_H
 
 #include "player/outputs.h"
 

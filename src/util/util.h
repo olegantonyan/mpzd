@@ -1,6 +1,7 @@
 #ifndef UTIL_UTIL_H
 #define UTIL_UTIL_H
 
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -69,5 +70,7 @@ bool is_listable_file(const char *path);
 
 uint32_t rng_u32(void);
 uint64_t mono_ms(void);
+
+bool join_within(pthread_t t, pthread_mutex_t *mu, pthread_cond_t *cv, const bool *done, unsigned sec);
 
 #endif

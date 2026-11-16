@@ -1,28 +1,31 @@
 #include "app.h"
 #include "library/library.h"
 #include "library/scan.h"
-#include "library/tags.h"
+#include "linux/outputs_linux.h"
 #include "model/model.h"
 #include "net/server.h"
 #include "player/audio.h"
-#include "player/outputs.h"
 #include "player/player.h"
 #include "proto/handlers.h"
 #include "proto/proto.h"
 #include "store/store.h"
 #include "util/bg.h"
+#include "util/loop.h"
 #include "util/util.h"
 #include "version.h"
 
 #include <ctype.h>
 #include <errno.h>
 #include <getopt.h>
+#include <libavutil/log.h>
 #include <locale.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/signalfd.h>
-#include <sys/timerfd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #define LOG_MODULE "main"
@@ -41,7 +44,8 @@ typedef struct {
   char *audio;
 } Config;
 
-static int save_timer = -1;
+static LoopTimer *save_timer;
+static LoopTimer *watchdog_timer;
 static bool save_armed;
 
 static void usage(const char *prog) {
@@ -130,34 +134,46 @@ static void save_now(void) {
 }
 
 static void schedule_save(void) {
-  if (save_armed || save_timer < 0) {
+  if (save_armed || !save_timer) {
     return;
   }
-  struct itimerspec its = { .it_value = { .tv_sec = SAVE_DELAY_SEC } };
-  if (timerfd_settime(save_timer, 0, &its, NULL) == 0) {
-    save_armed = true;
-  }
+  loop_timer_arm(save_timer, mono_ms() + SAVE_DELAY_SEC * 1000);
+  save_armed = true;
 }
 
 static void on_save_timer(void *ud) {
-  uint64_t v;
-  if (read(save_timer, &v, sizeof(v)) < 0) {
-    return;
-  }
   save_armed = false;
   save_now();
 }
 
 static void on_watchdog(void *ud) {
-  int fd = *(int *)ud;
-  uint64_t v;
-  if (read(fd, &v, sizeof(v)) == sizeof(v)) {
-    scanner_watchdog();
-    player_watchdog();
-  }
+  loop_timer_arm(watchdog_timer, mono_ms() + WATCHDOG_SEC * 1000);
+  scanner_watchdog();
+  player_watchdog();
 }
 
-static void on_signal(void *ud) {
+static bool listen_unix(const char *path) {
+  struct sockaddr_un addr = { .sun_family = AF_UNIX };
+  if (strlen(path) >= sizeof(addr.sun_path)) {
+    LOG("socket path too long: %s", path);
+    return false;
+  }
+  strcpy(addr.sun_path, path);
+  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) {
+    return false;
+  }
+  unlink(path);
+  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    LOG("bind %s: %s", path, strerror(errno));
+    close(fd);
+    return false;
+  }
+  LOG("listening on %s", path);
+  return server_listen_fd(fd, false);
+}
+
+static void on_signal(void *ud, short revents) {
   int fd = *(int *)ud;
   struct signalfd_siginfo si;
   if (read(fd, &si, sizeof(si)) != sizeof(si)) {
@@ -167,7 +183,7 @@ static void on_signal(void *ud) {
     save_now();
   } else {
     LOG("signal %u, shutting down", si.ssi_signo);
-    server_stop();
+    loop_stop();
   }
 }
 
@@ -252,7 +268,7 @@ int main(int argc, char **argv) {
   sigprocmask(SIG_BLOCK, &mask, NULL);
   signal(SIGPIPE, SIG_IGN);
 
-  tags_init();
+  av_log_set_level(AV_LOG_QUIET);
   model_init();
   int lib_rc = library_set(cfg.library);
   if (lib_rc < 0) {
@@ -279,42 +295,43 @@ int main(int argc, char **argv) {
   ServerConfig scfg = {
     .bind = cfg.bind,
     .port = cfg.port,
-    .socket_path = cfg.socket,
     .greeting = proto_greeting(),
     .max_clients = atoi(cfg.max_clients) > 0 ? atoi(cfg.max_clients) : 16,
     .max_output = 8 * 1024 * 1024,
   };
-  if (!server_init(&scfg, proto_handle_line)) {
+  bool listening = server_init(&scfg, proto_handle_line);
+  if (cfg.socket && *cfg.socket) {
+    listening = listen_unix(cfg.socket) || listening;
+  }
+  if (!listening) {
     LOG("no listening sockets");
     return 1;
   }
 
-  int audio_fd, scan_fd, bg_fd, bg_timer_fd;
+  int audio_fd, scan_fd;
   char *pcm = outputs_pcm(M.output);
   bool audio_ok = audio_init(pcm, &audio_fd);
   free(pcm);
-  if (!audio_ok || !scanner_start(&scan_fd) || !bg_init(&bg_fd, &bg_timer_fd)) {
+  if (!audio_ok || !scanner_start(&scan_fd) || !bg_init()) {
     LOG("cannot start worker threads");
     return 1;
   }
   player_init(&resume);
 
-  save_timer = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-  int watchdog_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-  struct itimerspec every = { .it_interval = { .tv_sec = WATCHDOG_SEC }, .it_value = { .tv_sec = WATCHDOG_SEC } };
   int sig_fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
-  if (save_timer < 0 || watchdog_fd < 0 || sig_fd < 0 || timerfd_settime(watchdog_fd, 0, &every, NULL) != 0) {
-    LOG("cannot create timers: %s", strerror(errno));
+  if (sig_fd < 0) {
+    LOG("signalfd: %s", strerror(errno));
     return 1;
   }
-  bool fds_ok = server_add_fd(audio_fd, player_on_audio, NULL) && server_add_fd(scan_fd, scan_on_done, NULL) && server_add_fd(bg_fd, bg_on_event, NULL) && server_add_fd(bg_timer_fd, bg_on_timer, NULL) && server_add_fd(save_timer, on_save_timer, NULL) && server_add_fd(watchdog_fd, on_watchdog, &watchdog_fd) && server_add_fd(sig_fd, on_signal, &sig_fd);
-  if (!fds_ok) {
-    LOG("cannot register event sources");
-    return 1;
-  }
+  loop_add_fd(audio_fd, POLLIN, player_on_audio, NULL);
+  loop_add_fd(scan_fd, POLLIN, scan_on_done, NULL);
+  loop_add_fd(sig_fd, POLLIN, on_signal, &sig_fd);
+  save_timer = loop_timer_new(on_save_timer, NULL);
+  watchdog_timer = loop_timer_new(on_watchdog, NULL);
+  loop_timer_arm(watchdog_timer, mono_ms() + WATCHDOG_SEC * 1000);
   app_on_change = schedule_save;
 
-  server_run();
+  loop_run();
 
   bg_shutdown();
   StorePlaying playing = player_store_state();
@@ -323,8 +340,10 @@ int main(int argc, char **argv) {
   scanner_stop();
   audio_shutdown();
   server_shutdown();
-  close(save_timer);
-  close(watchdog_fd);
+  if (cfg.socket && *cfg.socket) {
+    unlink(cfg.socket);
+  }
+  loop_free();
   close(sig_fd);
   model_free();
   store_free();
