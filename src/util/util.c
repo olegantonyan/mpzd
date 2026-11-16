@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/random.h>
+#include <time.h>
 
 void *xmalloc(size_t n) {
   void *p = malloc(n ? n : 1);
@@ -217,4 +218,10 @@ uint32_t rng_u32(void) {
   state ^= state >> 7;
   state ^= state << 17;
   return (uint32_t)(state >> 32);
+}
+
+uint64_t mono_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }

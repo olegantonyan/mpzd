@@ -10,6 +10,8 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#define LOG_MODULE "library"
+
 static bool is_under(const char *path, const char *root) {
   size_t n = strlen(root);
   if (n == 1 && root[0] == '/') {
@@ -18,12 +20,12 @@ static bool is_under(const char *path, const char *root) {
   return strncmp(path, root, n) == 0 && (path[n] == '\0' || path[n] == '/');
 }
 
-char *library_resolve(const char *path) {
+char *library_resolve(const char *root, const char *path) {
   char *real = realpath(path, NULL);
   if (!real) {
     return NULL;
   }
-  if (!M.library || !is_under(real, M.library)) {
+  if (!root || !is_under(real, root)) {
     free(real);
     return NULL;
   }
@@ -33,23 +35,31 @@ char *library_resolve(const char *path) {
 int library_set(const char *path) {
   char *real = realpath(path, NULL);
   if (!real) {
-    return -errno;
-  }
-  struct stat st;
-  if (stat(real, &st) != 0 || !S_ISDIR(st.st_mode)) {
-    free(real);
-    return -ENOTDIR;
+    int err = errno;
+    if (path[0] != '/') {
+      return -err;
+    }
+    LOG("library %s unavailable: %s", path, strerror(err));
+    real = xstrdup(path);
+    for (size_t n = strlen(real); n > 1 && real[n - 1] == '/'; n--) {
+      real[n - 1] = '\0';
+    }
+  } else {
+    struct stat st;
+    if (stat(real, &st) != 0 || !S_ISDIR(st.st_mode)) {
+      free(real);
+      return -ENOTDIR;
+    }
   }
   free(M.library);
   M.library = real;
   return 0;
 }
 
-static LsSort ls_sort_mode;
-
-static int cmp_entries(const void *pa, const void *pb) {
+static int cmp_entries(const void *pa, const void *pb, void *arg) {
   const LsEntry *a = pa;
   const LsEntry *b = pb;
+  LsSort ls_sort_mode = *(const LsSort *)arg;
   if (a->dir != b->dir) {
     return a->dir ? -1 : 1;
   }
@@ -90,8 +100,7 @@ int library_ls(const char *dir, LsSort sort, LsEntry **out, size_t *n) {
   }
   sb_free(&p);
   closedir(d);
-  ls_sort_mode = sort;
-  qsort(v, len, sizeof(LsEntry), cmp_entries);
+  qsort_r(v, len, sizeof(LsEntry), cmp_entries, &sort);
   *out = v;
   *n = len;
   return 0;

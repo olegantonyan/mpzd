@@ -20,6 +20,7 @@ void store_free(void);
 bool store_load(StorePlaying *playing);
 bool store_flush(const StorePlaying *playing, bool force_state);
 void store_playlist_deleted(uint32_t id);
+bool store_shutdown(unsigned timeout_ms);
 
 bool store_write_playlist(FILE *f, const Playlist *p);
 Playlist *store_read_playlist(FILE *f);

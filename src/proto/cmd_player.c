@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define OUTPUTS_TIMEOUT_MS 3000
+
 static bool status(int argc, char **argv) {
   PlayerStatus st;
   player_status(&st);
@@ -117,32 +119,71 @@ static bool volume(int argc, char **argv) {
   return true;
 }
 
-static bool outputs(int argc, char **argv) {
-  OutputList l = { 0 };
-  if (!outputs_list(&l)) {
-    output_list_free(&l);
-    return r_err(E_IO, "cannot list outputs");
+typedef struct {
+  Deferred *d;
+  char *id;
+  bool ok;
+  OutputList list;
+} OutputJob;
+
+static void outputs_work(void *arg) {
+  OutputJob *job = arg;
+  job->ok = job->id ? outputs_valid(job->id) : outputs_list(&job->list);
+}
+
+static void output_job_free(void *arg) {
+  OutputJob *job = arg;
+  free(job->id);
+  output_list_free(&job->list);
+  free(job);
+}
+
+static void outputs_reply(const OutputJob *job) {
+  if (!job->ok) {
+    r_err(E_IO, "cannot list outputs");
+    return;
   }
-  for (size_t i = 0; i < l.len; i++) {
-    r_str("output", l.v[i].id);
-    r_str("desc", l.v[i].desc);
-    if (strcmp(l.v[i].id, M.output) == 0) {
+  for (size_t i = 0; i < job->list.len; i++) {
+    r_str("output", job->list.v[i].id);
+    r_str("desc", job->list.v[i].desc);
+    if (strcmp(job->list.v[i].id, M.output) == 0) {
       r_u32("active", 1);
     }
   }
-  output_list_free(&l);
-  return true;
+}
+
+static void outputs_done(void *arg, bool timed_out) {
+  OutputJob *job = arg;
+  if (r_resume(job->d, timed_out)) {
+    outputs_reply(job);
+  }
+  r_finish(job->d, true);
+}
+
+static bool outputs(int argc, char **argv) {
+  OutputJob *job = xcalloc(1, sizeof(*job));
+  return r_async(job, &job->d, outputs_work, outputs_done, output_job_free, OUTPUTS_TIMEOUT_MS);
+}
+
+static void output_done(void *arg, bool timed_out) {
+  OutputJob *job = arg;
+  if (r_resume(job->d, timed_out) && !job->ok) {
+    r_err(E_NOT_FOUND, "unknown output '%s'", job->id);
+  } else if (!timed_out) {
+    player_set_output(job->id);
+    r_str("output", M.output);
+  }
+  r_finish(job->d, true);
 }
 
 static bool output(int argc, char **argv) {
-  if (argc > 0) {
-    if (!outputs_valid(argv[0])) {
-      return r_err(E_NOT_FOUND, "unknown output '%s'", argv[0]);
-    }
-    player_set_output(argv[0]);
+  if (argc == 0) {
+    r_str("output", M.output);
+    return true;
   }
-  r_str("output", M.output);
-  return true;
+  OutputJob *job = xcalloc(1, sizeof(*job));
+  job->id = xstrdup(argv[0]);
+  return r_async(job, &job->d, outputs_work, output_done, output_job_free, OUTPUTS_TIMEOUT_MS);
 }
 
 static bool order(int argc, char **argv) {

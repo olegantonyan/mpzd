@@ -1,7 +1,9 @@
 #include "proto/proto.h"
+#include "util/bg.h"
 #include "util/util.h"
 
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const Command *const tables[] = { cmd_meta, cmd_library, cmd_playlist, cmd_player };
@@ -10,7 +12,12 @@ static struct {
   Client *client;
   StrBuf reply;
   bool failed;
+  bool deferred;
 } R;
+
+struct Deferred {
+  Client *client;
+};
 
 int proto_tokenize(char *s, char **argv, int max) {
   int argc = 0;
@@ -151,11 +158,65 @@ bool arg_u32(const char *s, uint32_t *out, const char *what) {
   return true;
 }
 
-void proto_handle_line(Client *c, char *line) {
-  char *argv[PROTO_MAX_ARGS];
+static void begin(Client *c) {
   R.client = c;
   R.failed = false;
+  R.deferred = false;
   sb_reset(&R.reply);
+}
+
+static void end(Client *c) {
+  client_send(c, R.reply.data, R.reply.len);
+  if (R.reply.cap > 64 * 1024) {
+    sb_free(&R.reply);
+  }
+  R.client = NULL;
+}
+
+Deferred *r_defer(void) {
+  Deferred *d = xcalloc(1, sizeof(*d));
+  d->client = R.client;
+  R.deferred = true;
+  client_hold(d->client);
+  return d;
+}
+
+bool r_async(void *job, Deferred **slot, void (*work)(void *), void (*done)(void *, bool), void (*free_fn)(void *), unsigned timeout_ms) {
+  if (!bg_run(job, work, done, free_fn, timeout_ms)) {
+    free_fn(job);
+    return r_err(E_IO, "busy");
+  }
+  *slot = r_defer();
+  return true;
+}
+
+bool r_resume(Deferred *d, bool timed_out) {
+  begin(d->client);
+  if (timed_out) {
+    r_err(E_IO, "timed out");
+  }
+  return !timed_out;
+}
+
+void r_finish(Deferred *d, bool ok) {
+  Client *c = d->client;
+  free(d);
+  if (ok && !R.failed) {
+    sb_puts(&R.reply, "ok\n");
+  } else if (!R.failed) {
+    r_err(E_IO, "command failed");
+  }
+  if (client_alive(c)) {
+    end(c);
+  } else {
+    R.client = NULL;
+  }
+  client_release(c);
+}
+
+void proto_handle_line(Client *c, char *line) {
+  char *argv[PROTO_MAX_ARGS];
+  begin(c);
 
   int argc = proto_tokenize(line, argv, PROTO_MAX_ARGS);
   if (argc < 0) {
@@ -167,17 +228,20 @@ void proto_handle_line(Client *c, char *line) {
       r_err(E_SYNTAX, "unknown command '%s'", argv[0]);
     } else if (nargs < cmd->min_args || (cmd->max_args >= 0 && nargs > cmd->max_args)) {
       r_err(E_SYNTAX, "wrong number of arguments for '%s'", cmd->name);
-    } else if (cmd->fn(nargs, argv + 1) && !R.failed) {
-      sb_puts(&R.reply, "ok\n");
-    } else if (!R.failed) {
-      r_err(E_IO, "command failed");
+    } else {
+      bool ok = cmd->fn(nargs, argv + 1);
+      if (R.deferred) {
+        R.client = NULL;
+        return;
+      }
+      if (ok && !R.failed) {
+        sb_puts(&R.reply, "ok\n");
+      } else if (!R.failed) {
+        r_err(E_IO, "command failed");
+      }
     }
   } else {
     return;
   }
-  client_send(c, R.reply.data, R.reply.len);
-  if (R.reply.cap > 64 * 1024) {
-    sb_free(&R.reply);
-  }
-  R.client = NULL;
+  end(c);
 }

@@ -15,6 +15,7 @@
 #define RECENT_AVOID 16
 #define RANDOM_TRIES 64
 #define MAX_CONSECUTIVE_ERRORS 50
+#define START_TIMEOUT_MS 20000
 
 typedef enum { NAV_NEW, NAV_BACK, NAV_FWD, NAV_SEEK } Nav;
 
@@ -32,6 +33,7 @@ static struct {
   size_t cur_idx;
   uint64_t started_token;
   uint64_t pending_token;
+  uint64_t pending_since;
   uint32_t pending_pos;
   bool has_resume;
   uint32_t resume_ms;
@@ -104,6 +106,7 @@ static bool start(TrackRef r, uint32_t start_ms, Nav nav, bool paused) {
   }
   audio_play(&it, start_ms, paused);
   P.pending_token = it.token;
+  P.pending_since = mono_ms();
   P.pending_pos = start_ms;
   if (nav != NAV_SEEK) {
     P.decided_stamp = P.sel_stamp;
@@ -253,6 +256,26 @@ static void on_error(const AudioEvent *ev) {
   send_next(s->ref, s->idx, ev->token);
 }
 
+static void on_output_error(const AudioEvent *ev) {
+  if (P.pending_token && ev->token < P.pending_token) {
+    return;
+  }
+  LOG("output %s failed, stopped", ev->text);
+  Sent *s = lookup(ev->token);
+  if (s) {
+    P.cur = s->ref;
+    P.cur_idx = s->idx;
+    P.has_cur = true;
+  }
+  P.state = PS_STOPPED;
+  P.started_token = 0;
+  P.pending_token = 0;
+  P.errors = 0;
+  P.has_resume = P.has_cur;
+  P.resume_ms = ev->pos_ms;
+  changed();
+}
+
 void player_on_audio(void *ud) {
   (void)ud;
   audio_ack_events();
@@ -268,6 +291,9 @@ void player_on_audio(void *ud) {
       case AEV_ERROR:
         on_error(&ev);
         break;
+      case AEV_OUTPUT_ERROR:
+        on_output_error(&ev);
+        break;
       case AEV_STOPPED:
         if (P.state != PS_STOPPED) {
           P.state = PS_STOPPED;
@@ -282,6 +308,20 @@ void player_on_audio(void *ud) {
         break;
     }
   }
+}
+
+void player_watchdog(void) {
+  if (!P.pending_token || mono_ms() - P.pending_since < START_TIMEOUT_MS) {
+    return;
+  }
+  LOG("audio not responding, stopped");
+  audio_stop();
+  P.state = PS_STOPPED;
+  P.pending_token = 0;
+  P.started_token = 0;
+  P.has_resume = P.has_cur;
+  P.resume_ms = P.pending_pos;
+  changed();
 }
 
 void player_init(const StorePlaying *resume) {

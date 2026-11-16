@@ -62,18 +62,53 @@ static bool arg_at(int *argc, char ***argv, int64_t *at) {
   return true;
 }
 
-static bool resolve_paths(int argc, char **argv, StrVec *out) {
-  for (int i = 0; i < argc; i++) {
-    if (path_is_url(argv[i])) {
-      strvec_push(out, xstrdup(argv[i]));
-      continue;
-    }
-    char *real = library_resolve(argv[i]);
+typedef struct {
+  Deferred *d;
+  char *root;
+  StrVec args;
+  char *name;
+  uint32_t pl;
+  int64_t at;
+  StrVec paths;
+  const char *bad;
+} ResolveJob;
+
+static void resolve_work(void *arg) {
+  ResolveJob *job = arg;
+  for (size_t i = 0; i < job->args.len; i++) {
+    const char *a = job->args.v[i];
+    char *real = path_is_url(a) ? xstrdup(a) : library_resolve(job->root, a);
     if (!real) {
-      strvec_free(out);
-      return r_err(E_NOT_FOUND, "'%s' not found or outside the library", argv[i]);
+      job->bad = a;
+      return;
     }
-    strvec_push(out, real);
+    strvec_push(&job->paths, real);
+  }
+}
+
+static void resolve_free(void *arg) {
+  ResolveJob *job = arg;
+  free(job->root);
+  free(job->name);
+  strvec_free(&job->args);
+  strvec_free(&job->paths);
+  free(job);
+}
+
+static bool resolve_async(int argc, char **argv, ResolveJob *job, void (*done)(void *, bool)) {
+  job->root = xstrdup(M.library);
+  for (int i = 0; i < argc; i++) {
+    strvec_push(&job->args, xstrdup(argv[i]));
+  }
+  return r_async(job, &job->d, resolve_work, done, resolve_free, FS_TIMEOUT_MS);
+}
+
+static bool resolved(ResolveJob *job, bool timed_out) {
+  if (!r_resume(job->d, timed_out)) {
+    return false;
+  }
+  if (job->bad) {
+    return r_err(E_NOT_FOUND, "'%s' not found or outside the library", job->bad);
   }
   return true;
 }
@@ -125,7 +160,7 @@ void scan_on_done(void *ud) {
       apply_job(p, job);
       p->scanning--;
       playlist_changed(p);
-      server_event("scan %u done", p->id);
+      server_notify("scan %u done", p->id);
     }
     scanjob_free(job);
     job = next;
@@ -164,18 +199,36 @@ static bool playlists(int argc, char **argv) {
   return true;
 }
 
-static bool pl_new(int argc, char **argv) {
-  StrVec paths = { 0 };
-  if (!resolve_paths(argc - 1, argv + 1, &paths)) {
-    return false;
+static void pl_new_done(void *arg, bool timed_out) {
+  ResolveJob *job = arg;
+  if (resolved(job, timed_out)) {
+    char *name = job->name ? xstrdup(job->name) : library_playlist_name(job->paths.v, job->paths.len);
+    Playlist *p = model_create(name);
+    free(name);
+    submit(p, SCAN_ADD, -1, &job->paths, NULL);
+    r_u32("playlist", p->id);
+    list_changed();
   }
-  char *name = strcmp(argv[0], "-") == 0 ? library_playlist_name(paths.v, paths.len) : xstrdup(argv[0]);
-  Playlist *p = model_create(name);
-  free(name);
-  submit(p, SCAN_ADD, -1, &paths, NULL);
-  r_u32("playlist", p->id);
-  list_changed();
-  return true;
+  r_finish(job->d, true);
+}
+
+static bool pl_new(int argc, char **argv) {
+  ResolveJob *job = xcalloc(1, sizeof(*job));
+  job->name = strcmp(argv[0], "-") == 0 ? NULL : xstrdup(argv[0]);
+  return resolve_async(argc - 1, argv + 1, job, pl_new_done);
+}
+
+static void pl_add_done(void *arg, bool timed_out) {
+  ResolveJob *job = arg;
+  if (resolved(job, timed_out)) {
+    Playlist *p = model_find(job->pl);
+    if (p) {
+      submit(p, SCAN_ADD, job->at, &job->paths, NULL);
+    } else {
+      r_err(E_NOT_FOUND, "no playlist %u", job->pl);
+    }
+  }
+  r_finish(job->d, true);
 }
 
 static bool pl_add(int argc, char **argv) {
@@ -192,12 +245,10 @@ static bool pl_add(int argc, char **argv) {
   if (argc == 0) {
     return r_err(E_SYNTAX, "no paths");
   }
-  StrVec paths = { 0 };
-  if (!resolve_paths(argc, argv, &paths)) {
-    return false;
-  }
-  submit(p, SCAN_ADD, at, &paths, NULL);
-  return true;
+  ResolveJob *job = xcalloc(1, sizeof(*job));
+  job->pl = p->id;
+  job->at = at;
+  return resolve_async(argc, argv, job, pl_add_done);
 }
 
 static bool pl_tracks(int argc, char **argv) {

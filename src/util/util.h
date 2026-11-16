@@ -68,5 +68,6 @@ bool is_playlist_file(const char *path);
 bool is_listable_file(const char *path);
 
 uint32_t rng_u32(void);
+uint64_t mono_ms(void);
 
 #endif

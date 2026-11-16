@@ -2,10 +2,12 @@
 #include "util/util.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <zlib.h>
 
@@ -13,6 +15,29 @@
 #define PLAYLIST_MAGIC "mpzd-playlist 1"
 #define MAX_PLAYLIST_BYTES (256u << 20)
 #define STATE_MAGIC "mpzd-state 1"
+#define RETRY_SEC 10
+
+typedef struct WItem {
+  char *path;
+  char *data;
+  size_t len;
+  bool gz;
+  char *also_unlink;
+  struct WItem *next;
+} WItem;
+
+static struct {
+  pthread_t thread;
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+  pthread_cond_t idle;
+  WItem *head;
+  WItem *tail;
+  WItem *busy;
+  bool superseded;
+  bool quit;
+  bool running;
+} W = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .idle = PTHREAD_COND_INITIALIZER };
 
 static char *store_dir;
 
@@ -277,6 +302,8 @@ static int mkdir_p(const char *path) {
   return rc;
 }
 
+static void *writer(void *arg);
+
 bool store_init(const char *dir) {
   store_dir = xstrdup(dir);
   char *pl_dir = path_in_store("playlists");
@@ -286,6 +313,12 @@ bool store_init(const char *dir) {
     LOG("cannot create %s: %s", dir, strerror(errno));
     return false;
   }
+  W.quit = false;
+  if (pthread_create(&W.thread, NULL, writer, NULL) != 0) {
+    LOG("cannot start writer thread");
+    return false;
+  }
+  W.running = true;
   return true;
 }
 
@@ -294,7 +327,7 @@ void store_free(void) {
   store_dir = NULL;
 }
 
-static bool atomic_write(const char *path, bool (*writer)(FILE *, const void *), const void *ctx) {
+static bool atomic_write(const char *path, const char *data, size_t len) {
   StrBuf tmp = { 0 };
   sb_printf(&tmp, "%s.tmp", path);
   FILE *f = fopen(tmp.data, "w");
@@ -303,7 +336,7 @@ static bool atomic_write(const char *path, bool (*writer)(FILE *, const void *),
     sb_free(&tmp);
     return false;
   }
-  bool ok = writer(f, ctx) && fflush(f) == 0 && fsync(fileno(f)) == 0;
+  bool ok = fwrite(data, 1, len, f) == len && fflush(f) == 0 && fsync(fileno(f)) == 0;
   ok = (fclose(f) == 0) && ok;
   if (ok && rename(tmp.data, path) != 0) {
     ok = false;
@@ -316,12 +349,118 @@ static bool atomic_write(const char *path, bool (*writer)(FILE *, const void *),
   return ok;
 }
 
-static bool write_playlist_cb(FILE *f, const void *ctx) {
-  return store_write_playlist(f, ctx);
+static void unlink_logged(const char *path) {
+  if (unlink(path) != 0 && errno != ENOENT) {
+    LOG("cannot remove %s: %s", path, strerror(errno));
+  }
 }
 
-static bool write_state_cb(FILE *f, const void *ctx) {
-  const StorePlaying *playing = ctx;
+static bool process(WItem *it) {
+  if (!it->data) {
+    unlink_logged(it->path);
+    return true;
+  }
+  StrBuf gz = { 0 };
+  if (it->gz && !gzip(it->data, it->len, &gz)) {
+    LOG("cannot compress %s", it->path);
+    return true;
+  }
+  bool ok = it->gz ? atomic_write(it->path, gz.data, gz.len) : atomic_write(it->path, it->data, it->len);
+  sb_free(&gz);
+  if (ok && it->also_unlink) {
+    unlink_logged(it->also_unlink);
+  }
+  return ok;
+}
+
+static void witem_free(WItem *it) {
+  free(it->path);
+  free(it->data);
+  free(it->also_unlink);
+  free(it);
+}
+
+static void *writer(void *arg) {
+  (void)arg;
+  pthread_mutex_lock(&W.mu);
+  for (;;) {
+    while (!W.head && !W.quit) {
+      pthread_cond_wait(&W.cv, &W.mu);
+    }
+    if (!W.head) {
+      break;
+    }
+    WItem *it = W.head;
+    W.head = it->next;
+    if (!W.head) {
+      W.tail = NULL;
+    }
+    W.busy = it;
+    W.superseded = false;
+    pthread_mutex_unlock(&W.mu);
+    bool failing = false;
+    for (;;) {
+      if (process(it)) {
+        if (failing) {
+          LOG("saved %s", it->path);
+        }
+        break;
+      }
+      if (!failing) {
+        LOG("retrying every %d s", RETRY_SEC);
+        failing = true;
+      }
+      pthread_mutex_lock(&W.mu);
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_sec += RETRY_SEC;
+      while (!W.superseded && !W.quit && pthread_cond_timedwait(&W.cv, &W.mu, &ts) == 0) {
+      }
+      bool stop = W.superseded || W.quit;
+      pthread_mutex_unlock(&W.mu);
+      if (stop) {
+        break;
+      }
+    }
+    witem_free(it);
+    pthread_mutex_lock(&W.mu);
+    W.busy = NULL;
+    pthread_cond_broadcast(&W.idle);
+  }
+  pthread_mutex_unlock(&W.mu);
+  return NULL;
+}
+
+static void enqueue(char *path, char *data, size_t len, bool gz, char *also_unlink) {
+  WItem *it = xcalloc(1, sizeof(*it));
+  it->path = path;
+  it->data = data;
+  it->len = len;
+  it->gz = gz;
+  it->also_unlink = also_unlink;
+  pthread_mutex_lock(&W.mu);
+  WItem **pp = &W.head;
+  W.tail = NULL;
+  while (*pp) {
+    WItem *q = *pp;
+    if (strcmp(q->path, path) == 0) {
+      *pp = q->next;
+      witem_free(q);
+    } else {
+      W.tail = q;
+      pp = &q->next;
+    }
+  }
+  if (W.busy && strcmp(W.busy->path, path) == 0) {
+    W.superseded = true;
+  }
+  *pp = it;
+  W.tail = it;
+  pthread_cond_broadcast(&W.cv);
+  pthread_mutex_unlock(&W.mu);
+}
+
+static char *state_text(const StorePlaying *playing, size_t *len) {
   StrBuf sb = { 0 };
   sb_printf(&sb, STATE_MAGIC "\nnext_playlist_id %u\norder %s\nfollow %d\nvolume %d\n", M.next_pl_id, order_name(M.order), M.follow ? 1 : 0, M.volume);
   if (M.output) {
@@ -336,9 +475,8 @@ static bool write_state_cb(FILE *f, const void *ctx) {
   for (size_t i = 0; i < M.len; i++) {
     sb_printf(&sb, "playlist %u\n", M.pls[i]->id);
   }
-  bool ok = fwrite(sb.data, 1, sb.len, f) == sb.len;
-  sb_free(&sb);
-  return ok;
+  *len = sb.len;
+  return sb.data;
 }
 
 bool store_load(StorePlaying *playing) {
@@ -419,18 +557,6 @@ bool store_load(StorePlaying *playing) {
   return ok;
 }
 
-static void unlink_logged(const char *path) {
-  if (unlink(path) != 0 && errno != ENOENT) {
-    LOG("cannot remove %s: %s", path, strerror(errno));
-  }
-}
-
-static void remove_legacy(uint32_t id) {
-  char *path = path_in_store("playlists/%u.tsv", id);
-  unlink_logged(path);
-  free(path);
-}
-
 bool store_flush(const StorePlaying *playing, bool force_state) {
   bool ok = true;
   for (size_t i = 0; i < M.len; i++) {
@@ -438,31 +564,60 @@ bool store_flush(const StorePlaying *playing, bool force_state) {
     if (!p->dirty) {
       continue;
     }
-    char *path = path_in_store("playlists/%u.tsv.gz", p->id);
-    if (atomic_write(path, write_playlist_cb, p)) {
-      p->dirty = false;
-      remove_legacy(p->id);
-    } else {
+    char *tsv = NULL;
+    size_t len = 0;
+    FILE *mem = open_memstream(&tsv, &len);
+    bool written = mem && write_tsv(mem, p);
+    written = mem && fclose(mem) == 0 && written;
+    if (!written) {
+      LOG("cannot serialize playlist %u", p->id);
+      free(tsv);
       ok = false;
+      continue;
     }
-    free(path);
+    enqueue(path_in_store("playlists/%u.tsv.gz", p->id), tsv, len, true, path_in_store("playlists/%u.tsv", p->id));
+    p->dirty = false;
   }
   if (M.dirty || M.list_dirty || force_state) {
-    char *path = path_in_store("state");
-    if (atomic_write(path, write_state_cb, playing)) {
-      M.dirty = false;
-      M.list_dirty = false;
-    } else {
-      ok = false;
-    }
-    free(path);
+    size_t len;
+    char *text = state_text(playing, &len);
+    enqueue(path_in_store("state"), text, len, false, NULL);
+    M.dirty = false;
+    M.list_dirty = false;
   }
   return ok;
 }
 
 void store_playlist_deleted(uint32_t id) {
-  char *path = path_in_store("playlists/%u.tsv.gz", id);
-  unlink_logged(path);
-  free(path);
-  remove_legacy(id);
+  enqueue(path_in_store("playlists/%u.tsv.gz", id), NULL, 0, false, NULL);
+  enqueue(path_in_store("playlists/%u.tsv", id), NULL, 0, false, NULL);
+}
+
+bool store_shutdown(unsigned timeout_ms) {
+  if (!W.running) {
+    return true;
+  }
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += timeout_ms / 1000;
+  ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+  if (ts.tv_nsec >= 1000000000L) {
+    ts.tv_sec++;
+    ts.tv_nsec -= 1000000000L;
+  }
+  pthread_mutex_lock(&W.mu);
+  while ((W.head || W.busy) && pthread_cond_timedwait(&W.idle, &W.mu, &ts) == 0) {
+  }
+  bool drained = !W.head && !W.busy;
+  W.quit = true;
+  pthread_cond_broadcast(&W.cv);
+  pthread_mutex_unlock(&W.mu);
+  W.running = false;
+  if (!drained) {
+    LOG("state not saved: disk timed out");
+    pthread_detach(W.thread);
+    return false;
+  }
+  pthread_join(W.thread, NULL);
+  return true;
 }

@@ -13,7 +13,7 @@ typedef struct {
   time_t mtime;
 } LsEntry;
 
-char *library_resolve(const char *path);
+char *library_resolve(const char *root, const char *path);
 int library_set(const char *path);
 int library_ls(const char *dir, LsSort sort, LsEntry **out, size_t *n);
 void library_ls_free(LsEntry *entries, size_t n);

@@ -25,6 +25,7 @@ bool scanner_start(int *event_fd);
 void scanner_stop(void);
 void scanner_submit(ScanJob *job);
 ScanJob *scanner_take_done(void);
+void scanner_watchdog(void);
 void scanjob_free(ScanJob *job);
 
 #endif

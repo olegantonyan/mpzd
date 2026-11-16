@@ -53,6 +53,13 @@ max_clients 16
 
 State is written atomically (`state` plus gzipped TSV `playlists/<id>.tsv.gz`, readable with `zcat`) within 2 s of a change and on SIGTERM/SIGINT; SIGHUP flushes immediately. Plain `playlists/<id>.tsv` from earlier builds is loaded and converted on the next save. After a restart while playing, `play` resumes at the saved position.
 
+Failures don't stall the daemon:
+
+- **Files:** a missing or unreadable file is skipped, and playback stops after a run of failures. File opens and reads time out after 10 s, streams after 15 s, and `stop` or `play` interrupts them.
+- **Library:** an unavailable library (card removed) only makes `ls`/`pl_new` fail until it is back. A scan that makes no progress for 30 s is abandoned.
+- **Output:** a failing or stalled output (5 s) stops playback and keeps the position, so `play` resumes after switching outputs.
+- **Disk:** saving happens on a separate thread. Failed writes are retried every 10 s.
+
 ## Quick try
 
 ```

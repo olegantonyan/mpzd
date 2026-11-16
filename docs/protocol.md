@@ -12,6 +12,8 @@ Line-based text over TCP (default `127.0.0.1:6601`) or a unix socket. UTF-8. Usa
 
 Error codes: `1` unknown command / syntax, `2` bad argument, `3` not found, `4` I/O, `5` invalid state.
 
+Commands that touch the filesystem or PipeWire (`ls`, `pl_new`, `pl_add`, `outputs`, `output <id>`) run off the main loop. They answer `err 4 timed out` after 5 s (3 s for outputs) or `err 4 busy` when too many earlier ones are still stuck. Other clients are never blocked. TCP connections get keepalive, so a dead peer is dropped within ~30 s.
+
 ## Events
 
 After `watch on` the server sends `! ...` lines between replies, never inside one. Events carry no data; clients re-fetch.

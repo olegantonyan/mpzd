@@ -21,6 +21,10 @@
 #define MAX_BOUNDARIES 4
 #define BUFFER_US 500000
 #define PERIOD_US 50000
+#define FILE_TIMEOUT_MS 10000
+#define STREAM_TIMEOUT_MS 15000
+#define OUTPUT_STALL_MS 5000
+#define JOIN_TIMEOUT_SEC 3
 
 typedef struct {
   uint64_t token;
@@ -63,6 +67,7 @@ typedef struct {
   char icy[200];
   bool icy_changed;
   unsigned icy_tick;
+  uint64_t deadline;
 } Decoder;
 
 typedef struct {
@@ -99,7 +104,10 @@ static struct {
 
   atomic_int volume;
   atomic_uint pos_ms;
+  atomic_bool abort;
 } A = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .efd = -1, .c_pause = -1 };
+
+typedef enum { PCM_OK, PCM_ABORT, PCM_FAIL } WriteResult;
 
 static struct {
   snd_pcm_t *pcm;
@@ -140,12 +148,13 @@ static void item_clear(Item *it) {
   memset(it, 0, sizeof(*it));
 }
 
-static void emit(AudioEventType type, uint64_t token, const char *text) {
+static void emit_at(AudioEventType type, uint64_t token, const char *text, uint32_t pos_ms) {
   pthread_mutex_lock(&A.mu);
   if (A.ev_tail - A.ev_head < EVENT_RING) {
     AudioEvent *e = &A.ev[A.ev_tail % EVENT_RING];
     e->type = type;
     e->token = token;
+    e->pos_ms = pos_ms;
     snprintf(e->text, sizeof(e->text), "%s", text ? text : "");
     A.ev_tail++;
   } else {
@@ -156,6 +165,23 @@ static void emit(AudioEventType type, uint64_t token, const char *text) {
   if (write(A.efd, &one, sizeof(one)) < 0) {
     LOG("eventfd write: %s", strerror(errno));
   }
+}
+
+static void emit(AudioEventType type, uint64_t token, const char *text) {
+  emit_at(type, token, text, 0);
+}
+
+static bool aborted(void) {
+  return atomic_load(&A.abort);
+}
+
+static int interrupt_cb(void *opaque) {
+  const Decoder *d = opaque;
+  return aborted() || mono_ms() > d->deadline;
+}
+
+static void arm_deadline(Decoder *d) {
+  d->deadline = mono_ms() + (d->item.stream ? STREAM_TIMEOUT_MS : FILE_TIMEOUT_MS);
 }
 
 static enum AVSampleFormat pick_format(const AVCodecContext *dec) {
@@ -217,8 +243,16 @@ static Decoder *decoder_open(const Item *it, uint32_t start_ms) {
   if (it->stream) {
     av_dict_set(&opts, "icy", "1", 0);
     av_dict_set(&opts, "reconnect", "1", 0);
+    av_dict_set(&opts, "reconnect_delay_max", "5", 0);
     av_dict_set(&opts, "rw_timeout", "15000000", 0);
   }
+  d->fmt = avformat_alloc_context();
+  if (!d->fmt) {
+    av_dict_free(&opts);
+    goto fail;
+  }
+  d->fmt->interrupt_callback = (AVIOInterruptCB){ interrupt_cb, d };
+  arm_deadline(d);
   int rc = avformat_open_input(&d->fmt, it->path, NULL, &opts);
   av_dict_free(&opts);
   if (rc < 0 || avformat_find_stream_info(d->fmt, NULL) < 0) {
@@ -276,7 +310,9 @@ static Decoder *decoder_open(const Item *it, uint32_t start_ms) {
   return d;
 
 fail:
-  LOG("cannot open %s", it->path);
+  if (!aborted()) {
+    LOG("%s %s", mono_ms() > d->deadline ? "timed out opening" : "cannot open", it->path);
+  }
   decoder_close(d);
   return NULL;
 }
@@ -376,6 +412,7 @@ static int decoder_pull(Decoder *d, uint8_t **out) {
         d->eof = true;
         return 0;
       }
+      arm_deadline(d);
       ret = av_read_frame(d->fmt, d->pkt);
       if (ret == AVERROR_EOF || (ret < 0 && d->fmt->pb && avio_feof(d->fmt->pb))) {
         avcodec_send_packet(d->dec, NULL);
@@ -431,7 +468,7 @@ static void pcm_close(void) {
 
 static bool pcm_open(PcmFmt f) {
   pcm_close();
-  int rc = snd_pcm_open(&T.pcm, A.device, SND_PCM_STREAM_PLAYBACK, 0);
+  int rc = snd_pcm_open(&T.pcm, A.device, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
   if (rc < 0) {
     LOG("snd_pcm_open %s: %s", A.device, snd_strerror(rc));
     T.pcm = NULL;
@@ -487,27 +524,43 @@ static bool pcm_ready(PcmFmt f) {
 
 static void update_position(void);
 
-static bool pcm_write(const uint8_t *data, int frames) {
+static WriteResult pcm_write(const uint8_t *data, int frames) {
+  uint64_t stalled_at = 0;
   while (frames > 0) {
+    if (aborted()) {
+      return PCM_ABORT;
+    }
     snd_pcm_uframes_t chunk = (snd_pcm_uframes_t)frames < T.period ? (snd_pcm_uframes_t)frames : T.period;
     snd_pcm_sframes_t n = snd_pcm_writei(T.pcm, data, chunk);
     if (n == -EAGAIN) {
-      continue;
+      uint64_t now = mono_ms();
+      if (!stalled_at) {
+        stalled_at = now;
+      } else if (now - stalled_at > OUTPUT_STALL_MS) {
+        LOG("output %s stalled", A.device);
+        return PCM_FAIL;
+      }
+      int w = snd_pcm_wait(T.pcm, 100);
+      if (w >= 0) {
+        continue;
+      }
+      n = w;
     }
     if (n < 0) {
       int rc = snd_pcm_recover(T.pcm, (int)n, 1);
       if (rc < 0) {
-        LOG("snd_pcm_writei: %s", snd_strerror(rc));
-        return false;
+        LOG("output %s: %s", A.device, snd_strerror(rc));
+        return PCM_FAIL;
       }
       continue;
     }
+    stalled_at = 0;
     data += n * T.bpf;
     frames -= (int)n;
     T.written += (uint64_t)n;
     update_position();
   }
-  return true;
+  return PCM_OK;
 }
 
 static void apply_volume(uint8_t *data, int frames, PcmFmt f) {
@@ -599,6 +652,11 @@ static void wait_for_next(uint64_t token) {
   T.waiting_for = token;
 }
 
+static void output_failed(uint64_t token, uint32_t pos_ms) {
+  do_stop();
+  emit_at(AEV_OUTPUT_ERROR, token, A.device, pos_ms);
+}
+
 static void do_play(const Item *it, uint32_t start_ms, bool paused) {
   reset_playback();
   if (T.pcm) {
@@ -606,11 +664,17 @@ static void do_play(const Item *it, uint32_t start_ms, bool paused) {
     T.hw_paused = false;
   }
   Decoder *d = decoder_open(it, start_ms);
-  if (!d || !pcm_ready(d->out)) {
-    decoder_close(d);
+  if (!d) {
     pcm_close();
-    emit(AEV_ERROR, it->token, "cannot play");
-    wait_for_next(it->token);
+    if (!aborted()) {
+      emit(AEV_ERROR, it->token, "cannot play");
+      wait_for_next(it->token);
+    }
+    return;
+  }
+  if (!pcm_ready(d->out)) {
+    decoder_close(d);
+    output_failed(it->token, start_ms);
     return;
   }
   boundary_push(it, 0, start_ms, d->desc);
@@ -621,7 +685,17 @@ static void do_play(const Item *it, uint32_t start_ms, bool paused) {
 
 static void finish_output(void) {
   if (T.pcm && !T.paused) {
-    snd_pcm_drain(T.pcm);
+    int rc = snd_pcm_drain(T.pcm);
+    uint64_t deadline = mono_ms() + BUFFER_US / 1000 + 1000;
+    while ((rc == -EAGAIN || rc == 0) && snd_pcm_state(T.pcm) == SND_PCM_STATE_DRAINING) {
+      if (aborted() || mono_ms() > deadline) {
+        snd_pcm_drop(T.pcm);
+        break;
+      }
+      update_position();
+      struct timespec ts = { 0, 20 * 1000000L };
+      nanosleep(&ts, NULL);
+    }
   }
   update_position();
 }
@@ -640,16 +714,17 @@ static void do_next(const Item *it, uint64_t for_token) {
   }
   Decoder *d = decoder_open(it, 0);
   if (!d) {
-    emit(AEV_ERROR, it->token, "cannot play");
-    wait_for_next(it->token);
+    if (!aborted()) {
+      emit(AEV_ERROR, it->token, "cannot play");
+      wait_for_next(it->token);
+    }
     return;
   }
   if (!T.pcm || !same_fmt(T.fmt, d->out)) {
     finish_output();
     if (!pcm_open(d->out)) {
       decoder_close(d);
-      emit(AEV_ERROR, it->token, "cannot open output");
-      wait_for_next(it->token);
+      output_failed(it->token, 0);
       return;
     }
   }
@@ -712,14 +787,19 @@ static void step(void) {
   }
   if (frames > 0) {
     apply_volume(data, frames, T.cur->out);
-    if (pcm_write(data, frames)) {
-      return;
+    if (pcm_write(data, frames) == PCM_FAIL) {
+      update_position();
+      output_failed(T.has_audible ? T.audible.item.token : T.cur->item.token, atomic_load(&A.pos_ms));
     }
-    pcm_close();
-    frames = -1;
+    return;
+  }
+  if (aborted()) {
+    return;
   }
   if (frames < 0) {
-    LOG("decode error in %s", T.cur->item.path);
+    char msg[AV_ERROR_MAX_STRING_SIZE];
+    av_strerror(frames, msg, sizeof(msg));
+    LOG("%s in %s", mono_ms() > T.cur->deadline ? "read timed out" : msg, T.cur->item.path);
   }
   uint64_t token = T.cur->item.token;
   decoder_close(T.cur);
@@ -763,6 +843,7 @@ static void *audio_main(void *arg) {
     int pause = A.c_pause;
     char *device = A.c_device;
     A.c_device = NULL;
+    atomic_store(&A.abort, false);
     memset(&A.c_play_item, 0, sizeof(Item));
     memset(&A.c_next_item, 0, sizeof(Item));
     A.c_stop = A.c_play = A.c_next = false;
@@ -823,10 +904,18 @@ void audio_shutdown(void) {
   }
   pthread_mutex_lock(&A.mu);
   A.c_quit = true;
+  atomic_store(&A.abort, true);
   pthread_cond_signal(&A.cv);
   pthread_mutex_unlock(&A.mu);
-  pthread_join(A.thread, NULL);
   A.running = false;
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += JOIN_TIMEOUT_SEC;
+  if (pthread_timedjoin_np(A.thread, NULL, &ts) != 0) {
+    LOG("audio thread stuck, not waiting for it");
+    pthread_detach(A.thread);
+    return;
+  }
   item_clear(&A.c_play_item);
   item_clear(&A.c_next_item);
   item_clear(&T.audible.item);
@@ -852,6 +941,7 @@ void audio_play(const AudioItem *item, uint32_t start_ms, bool paused) {
   A.c_play = true;
   A.c_play_start = start_ms;
   A.c_play_paused = paused;
+  atomic_store(&A.abort, true);
   A.c_stop = false;
   A.c_next = false;
   A.c_pause = -1;
@@ -886,6 +976,7 @@ void audio_pause(bool pause) {
 void audio_stop(void) {
   pthread_mutex_lock(&A.mu);
   A.c_stop = true;
+  atomic_store(&A.abort, true);
   A.c_play = false;
   A.c_next = false;
   A.c_pause = -1;

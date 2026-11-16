@@ -4,8 +4,11 @@
 #include "model/sort.h"
 #include "proto/proto.h"
 #include "store/store.h"
+#include "util/bg.h"
 #include "util/util.h"
 
+#include <poll.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -325,6 +328,146 @@ static void test_store_files(void) {
   playlist_free(p);
 }
 
+static int bg_done_calls;
+static int bg_timeouts;
+static atomic_int bg_frees;
+
+typedef struct {
+  unsigned sleep_ms;
+  int result;
+} BgTest;
+
+static void bgt_work(void *arg) {
+  BgTest *t = arg;
+  usleep(t->sleep_ms * 1000);
+  t->result = 42;
+}
+
+static void bgt_done(void *arg, bool timed_out) {
+  bg_done_calls++;
+  if (timed_out) {
+    bg_timeouts++;
+  } else {
+    CHECK(((BgTest *)arg)->result == 42);
+  }
+}
+
+static void bgt_free(void *arg) {
+  atomic_fetch_add(&bg_frees, 1);
+  free(arg);
+}
+
+static BgTest *bgt(unsigned sleep_ms) {
+  BgTest *t = xcalloc(1, sizeof(*t));
+  t->sleep_ms = sleep_ms;
+  return t;
+}
+
+static void bg_pump(int efd, int tfd, int want_done, unsigned max_ms) {
+  uint64_t until = mono_ms() + max_ms;
+  while (bg_done_calls < want_done && mono_ms() < until) {
+    struct pollfd fds[2] = { { .fd = efd, .events = POLLIN }, { .fd = tfd, .events = POLLIN } };
+    if (poll(fds, 2, 50) > 0) {
+      if (fds[0].revents & POLLIN) {
+        bg_on_event(NULL);
+      }
+      if (fds[1].revents & POLLIN) {
+        bg_on_timer(NULL);
+      }
+    }
+  }
+}
+
+static void test_bg(void) {
+  int efd, tfd;
+  CHECK(bg_init(&efd, &tfd));
+  CHECK(bg_run(bgt(10), bgt_work, bgt_done, bgt_free, 1000));
+  bg_pump(efd, tfd, 1, 2000);
+  CHECK(bg_done_calls == 1 && bg_timeouts == 0 && atomic_load(&bg_frees) == 1);
+
+  CHECK(bg_run(bgt(400), bgt_work, bgt_done, bgt_free, 50));
+  bg_pump(efd, tfd, 2, 2000);
+  CHECK(bg_done_calls == 2 && bg_timeouts == 1 && atomic_load(&bg_frees) == 1);
+  usleep(600 * 1000);
+  CHECK(atomic_load(&bg_frees) == 2);
+
+  int started = 0;
+  for (int i = 0; i < 32; i++) {
+    BgTest *t = bgt(300);
+    if (bg_run(t, bgt_work, bgt_done, bgt_free, 20)) {
+      started++;
+    } else {
+      free(t);
+    }
+  }
+  CHECK(started == 16);
+  bg_pump(efd, tfd, 2 + started, 2000);
+  CHECK(bg_done_calls == 2 + started && bg_timeouts == 1 + started);
+  usleep(500 * 1000);
+  CHECK(atomic_load(&bg_frees) == 2 + started);
+  CHECK(bg_run(bgt(0), bgt_work, bgt_done, bgt_free, 1000));
+  bg_pump(efd, tfd, 3 + started, 2000);
+  CHECK(bg_done_calls == 3 + started);
+  bg_shutdown();
+}
+
+static Playlist *read_back(const char *dir, uint32_t id) {
+  char path[600];
+  snprintf(path, sizeof(path), "%s/playlists/%u.tsv.gz", dir, id);
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    return NULL;
+  }
+  Playlist *p = store_read_playlist(f);
+  fclose(f);
+  return p;
+}
+
+static void test_store_writer(void) {
+  char dir[400];
+  snprintf(dir, sizeof(dir), "%s/state", tmpdir);
+  model_init();
+  CHECK(store_init(dir));
+  Playlist *p = model_create("first");
+  Track t = mk("/m/a.flac", "A", 2000, 1);
+  playlist_insert(p, 0, &t, 1);
+  p->dirty = true;
+  CHECK(store_flush(NULL, true));
+  free(p->name);
+  p->name = xstrdup("second");
+  p->dirty = true;
+  CHECK(store_flush(NULL, false));
+  CHECK(store_shutdown(5000));
+  Playlist *q = read_back(dir, p->id);
+  CHECK(q != NULL && strcmp(q->name, "second") == 0 && q->len == 1);
+  playlist_free(q);
+  char state[600];
+  snprintf(state, sizeof(state), "%s/state", dir);
+  CHECK(access(state, F_OK) == 0);
+
+  store_free();
+  CHECK(store_init(dir));
+  store_playlist_deleted(p->id);
+  CHECK(store_shutdown(5000));
+  CHECK(read_back(dir, p->id) == NULL);
+
+  if (geteuid() != 0) {
+    store_free();
+    CHECK(store_init(dir));
+    char pl_dir[600];
+    snprintf(pl_dir, sizeof(pl_dir), "%s/playlists", dir);
+    chmod(pl_dir, 0500);
+    p->dirty = true;
+    uint64_t t0 = mono_ms();
+    CHECK(store_flush(NULL, false));
+    CHECK(mono_ms() - t0 < 1000);
+    CHECK(!store_shutdown(300));
+    chmod(pl_dir, 0700);
+  }
+  store_free();
+  model_free();
+}
+
 int main(void) {
   snprintf(tmpdir, sizeof(tmpdir), "/tmp/mpzd-test-XXXXXX");
   const char *base = getenv("TMPDIR");
@@ -344,6 +487,8 @@ int main(void) {
   test_m3u();
   test_store_roundtrip();
   test_store_files();
+  test_bg();
+  test_store_writer();
 
   char cmd[600];
   snprintf(cmd, sizeof(cmd), "rm -rf '%s'", tmpdir);

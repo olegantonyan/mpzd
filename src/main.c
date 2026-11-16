@@ -10,6 +10,7 @@
 #include "proto/handlers.h"
 #include "proto/proto.h"
 #include "store/store.h"
+#include "util/bg.h"
 #include "util/util.h"
 #include "version.h"
 
@@ -26,6 +27,8 @@
 
 #define LOG_MODULE "main"
 #define SAVE_DELAY_SEC 2
+#define WATCHDOG_SEC 5
+#define SHUTDOWN_SAVE_MS 5000
 
 typedef struct {
   char *bind;
@@ -143,6 +146,15 @@ static void on_save_timer(void *ud) {
   }
   save_armed = false;
   save_now();
+}
+
+static void on_watchdog(void *ud) {
+  int fd = *(int *)ud;
+  uint64_t v;
+  if (read(fd, &v, sizeof(v)) == sizeof(v)) {
+    scanner_watchdog();
+    player_watchdog();
+  }
 }
 
 static void on_signal(void *ud) {
@@ -277,32 +289,42 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  int audio_fd, scan_fd;
+  int audio_fd, scan_fd, bg_fd, bg_timer_fd;
   char *pcm = outputs_pcm(M.output);
   bool audio_ok = audio_init(pcm, &audio_fd);
   free(pcm);
-  if (!audio_ok || !scanner_start(&scan_fd)) {
+  if (!audio_ok || !scanner_start(&scan_fd) || !bg_init(&bg_fd, &bg_timer_fd)) {
     LOG("cannot start worker threads");
     return 1;
   }
   player_init(&resume);
 
   save_timer = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  int watchdog_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  struct itimerspec every = { .it_interval = { .tv_sec = WATCHDOG_SEC }, .it_value = { .tv_sec = WATCHDOG_SEC } };
   int sig_fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
-  server_add_fd(audio_fd, player_on_audio, NULL);
-  server_add_fd(scan_fd, scan_on_done, NULL);
-  server_add_fd(save_timer, on_save_timer, NULL);
-  server_add_fd(sig_fd, on_signal, &sig_fd);
+  if (save_timer < 0 || watchdog_fd < 0 || sig_fd < 0 || timerfd_settime(watchdog_fd, 0, &every, NULL) != 0) {
+    LOG("cannot create timers: %s", strerror(errno));
+    return 1;
+  }
+  bool fds_ok = server_add_fd(audio_fd, player_on_audio, NULL) && server_add_fd(scan_fd, scan_on_done, NULL) && server_add_fd(bg_fd, bg_on_event, NULL) && server_add_fd(bg_timer_fd, bg_on_timer, NULL) && server_add_fd(save_timer, on_save_timer, NULL) && server_add_fd(watchdog_fd, on_watchdog, &watchdog_fd) && server_add_fd(sig_fd, on_signal, &sig_fd);
+  if (!fds_ok) {
+    LOG("cannot register event sources");
+    return 1;
+  }
   app_on_change = schedule_save;
 
   server_run();
 
+  bg_shutdown();
   StorePlaying playing = player_store_state();
   store_flush(&playing, true);
+  store_shutdown(SHUTDOWN_SAVE_MS);
   scanner_stop();
   audio_shutdown();
   server_shutdown();
   close(save_timer);
+  close(watchdog_fd);
   close(sig_fd);
   model_free();
   store_free();

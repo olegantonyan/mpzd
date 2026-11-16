@@ -5,6 +5,7 @@
 #include "model/sort.h"
 
 #include <dirent.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,10 @@
 #include <unistd.h>
 
 #define LOG_MODULE "scan"
+#define STALL_MS 30000
+#define JOIN_TIMEOUT_SEC 3
+
+static void progress(const char *path);
 
 static void add_stream(const char *url, TrackVec *out) {
   TrackInfo info = { .str = { [TS_PATH] = url }, .flags = TRACK_STREAM };
@@ -22,6 +27,7 @@ static void add_stream(const char *url, TrackVec *out) {
 }
 
 static void add_file(const char *path, TrackVec *out) {
+  progress(path);
   Track t;
   if (tags_read(path, &t)) {
     trackvec_push(out, &t);
@@ -43,6 +49,7 @@ static void walk(const char *dir, StrVec *audio, StrVec *cues) {
     sb_puts(&p, dir);
     sb_puts(&p, "/");
     sb_puts(&p, e->d_name);
+    progress(p.data);
     unsigned char type = e->d_type;
     if (type == DT_UNKNOWN || type == DT_LNK) {
       struct stat st;
@@ -82,6 +89,7 @@ static void scan_dir(const char *dir, TrackVec *out) {
 
   TrackVec found = { 0 };
   for (size_t i = 0; i < cues.len; i++) {
+    progress(cues.v[i]);
     cue_parse(cues.v[i], tags_duration_ms, &found, &referenced);
   }
   if (referenced.len) {
@@ -151,6 +159,7 @@ void scan_reload(TrackVec *tracks) {
       continue;
     }
     Track fresh;
+    progress(track_str(t, TS_PATH));
     if (tags_read(track_str(t, TS_PATH), &fresh)) {
       fresh.id = t->id;
       track_free(t);
@@ -170,7 +179,32 @@ static struct {
   int efd;
   bool quit;
   bool running;
+  unsigned gen;
+  ScanJob *current;
+  uint64_t progress_at;
+  char where[PATH_MAX];
 } S = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .efd = -1 };
+
+static void progress(const char *path) {
+  pthread_mutex_lock(&S.mu);
+  S.progress_at = mono_ms();
+  snprintf(S.where, sizeof(S.where), "%s", path);
+  pthread_mutex_unlock(&S.mu);
+}
+
+static void push_done(ScanJob *job) {
+  job->next = NULL;
+  if (S.done_tail) {
+    S.done_tail->next = job;
+  } else {
+    S.done_head = job;
+  }
+  S.done_tail = job;
+  uint64_t one = 1;
+  if (write(S.efd, &one, sizeof(one)) < 0) {
+    LOG("eventfd write failed");
+  }
+}
 
 static void run_job(ScanJob *job) {
   if (job->kind == SCAN_RELOAD) {
@@ -183,9 +217,9 @@ static void run_job(ScanJob *job) {
 }
 
 static void *worker(void *arg) {
-  (void)arg;
+  unsigned gen = (unsigned)(uintptr_t)arg;
   pthread_mutex_lock(&S.mu);
-  while (!S.quit) {
+  while (!S.quit && gen == S.gen) {
     ScanJob *job = S.todo_head;
     if (!job) {
       pthread_cond_wait(&S.cv, &S.mu);
@@ -195,25 +229,51 @@ static void *worker(void *arg) {
     if (!S.todo_head) {
       S.todo_tail = NULL;
     }
+    S.current = job;
+    S.progress_at = mono_ms();
     pthread_mutex_unlock(&S.mu);
 
     run_job(job);
 
     pthread_mutex_lock(&S.mu);
-    job->next = NULL;
-    if (S.done_tail) {
-      S.done_tail->next = job;
-    } else {
-      S.done_head = job;
+    if (gen != S.gen) {
+      pthread_mutex_unlock(&S.mu);
+      scanjob_free(job);
+      return NULL;
     }
-    S.done_tail = job;
-    uint64_t one = 1;
-    if (write(S.efd, &one, sizeof(one)) < 0) {
-      LOG("eventfd write failed");
-    }
+    S.current = NULL;
+    push_done(job);
   }
   pthread_mutex_unlock(&S.mu);
   return NULL;
+}
+
+static bool spawn(void) {
+  return pthread_create(&S.thread, NULL, worker, (void *)(uintptr_t)S.gen) == 0;
+}
+
+void scanner_watchdog(void) {
+  pthread_mutex_lock(&S.mu);
+  if (!S.current || mono_ms() - S.progress_at < STALL_MS) {
+    pthread_mutex_unlock(&S.mu);
+    return;
+  }
+  ScanJob *stuck = S.current;
+  LOG("scan of playlist %u stalled on %s, abandoned", stuck->pl_id, S.where);
+  ScanJob *job = xcalloc(1, sizeof(*job));
+  job->kind = stuck->kind;
+  job->pl_id = stuck->pl_id;
+  job->at = stuck->at;
+  S.current = NULL;
+  S.gen++;
+  push_done(job);
+  pthread_detach(S.thread);
+  pthread_cond_broadcast(&S.cv);
+  if (!spawn()) {
+    LOG("cannot restart scanner");
+    S.running = false;
+  }
+  pthread_mutex_unlock(&S.mu);
 }
 
 bool scanner_start(int *event_fd) {
@@ -221,7 +281,7 @@ bool scanner_start(int *event_fd) {
   if (S.efd < 0) {
     return false;
   }
-  if (pthread_create(&S.thread, NULL, worker, NULL) != 0) {
+  if (!spawn()) {
     close(S.efd);
     return false;
   }
@@ -236,10 +296,19 @@ void scanner_stop(void) {
   }
   pthread_mutex_lock(&S.mu);
   S.quit = true;
-  pthread_cond_signal(&S.cv);
+  pthread_cond_broadcast(&S.cv);
   pthread_mutex_unlock(&S.mu);
-  pthread_join(S.thread, NULL);
   S.running = false;
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += JOIN_TIMEOUT_SEC;
+  if (pthread_timedjoin_np(S.thread, NULL, &ts) != 0) {
+    pthread_mutex_lock(&S.mu);
+    LOG("scanner stuck on %s, not waiting for it", S.where);
+    pthread_mutex_unlock(&S.mu);
+    pthread_detach(S.thread);
+    return;
+  }
   for (ScanJob *j = S.todo_head; j;) {
     ScanJob *next = j->next;
     scanjob_free(j);
@@ -256,6 +325,12 @@ void scanner_stop(void) {
 }
 
 void scanner_submit(ScanJob *job) {
+  if (!S.running) {
+    pthread_mutex_lock(&S.mu);
+    push_done(job);
+    pthread_mutex_unlock(&S.mu);
+    return;
+  }
   job->next = NULL;
   pthread_mutex_lock(&S.mu);
   if (S.todo_tail) {

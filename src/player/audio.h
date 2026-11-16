@@ -12,11 +12,12 @@ typedef struct {
   bool stream;
 } AudioItem;
 
-typedef enum { AEV_STARTED, AEV_NEED_NEXT, AEV_STOPPED, AEV_ERROR, AEV_ICY } AudioEventType;
+typedef enum { AEV_STARTED, AEV_NEED_NEXT, AEV_STOPPED, AEV_ERROR, AEV_OUTPUT_ERROR, AEV_ICY } AudioEventType;
 
 typedef struct {
   AudioEventType type;
   uint64_t token;
+  uint32_t pos_ms;
   char text[256];
 } AudioEvent;
 

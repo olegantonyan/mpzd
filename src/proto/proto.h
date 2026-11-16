@@ -12,6 +12,7 @@
 enum { E_SYNTAX = 1, E_ARG = 2, E_NOT_FOUND = 3, E_IO = 4, E_STATE = 5 };
 
 typedef bool (*CmdFn)(int argc, char **argv);
+typedef struct Deferred Deferred;
 
 typedef struct {
   const char *name;
@@ -39,5 +40,12 @@ void r_opt_u32(const char *key, uint32_t value);
 bool r_err(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
 bool arg_u32(const char *s, uint32_t *out, const char *what);
+
+#define FS_TIMEOUT_MS 5000
+
+Deferred *r_defer(void);
+bool r_async(void *job, Deferred **slot, void (*work)(void *), void (*done)(void *, bool), void (*free_fn)(void *), unsigned timeout_ms);
+bool r_resume(Deferred *d, bool timed_out);
+void r_finish(Deferred *d, bool ok);
 
 #endif

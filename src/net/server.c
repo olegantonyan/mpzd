@@ -3,6 +3,8 @@
 
 #include <errno.h>
 #include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +22,7 @@ typedef enum { H_LISTEN, H_CLIENT, H_FD } HandleType;
 typedef struct {
   HandleType type;
   int fd;
+  bool tcp;
 } Handle;
 
 typedef struct {
@@ -38,6 +41,7 @@ struct Client {
   bool closing;
   bool dead;
   bool want_out;
+  int held;
   Client *next;
 };
 
@@ -65,7 +69,7 @@ static void epoll_mod(int fd, uint32_t events, void *ptr) {
   epoll_ctl(SV.epfd, EPOLL_CTL_MOD, fd, &ev);
 }
 
-static bool add_listener(int fd) {
+static bool add_listener(int fd, bool tcp) {
   if (SV.nlisteners >= MAX_LISTENERS || listen(fd, 16) != 0) {
     close(fd);
     return false;
@@ -73,6 +77,7 @@ static bool add_listener(int fd) {
   Handle *h = &SV.listeners[SV.nlisteners++];
   h->type = H_LISTEN;
   h->fd = fd;
+  h->tcp = tcp;
   return epoll_add(fd, EPOLLIN, h);
 }
 
@@ -100,7 +105,7 @@ static bool listen_tcp(const char *host, const char *port) {
       close(fd);
       continue;
     }
-    if (add_listener(fd)) {
+    if (add_listener(fd, true)) {
       any = true;
     }
   }
@@ -129,7 +134,7 @@ static bool listen_unix(const char *path) {
     return false;
   }
   LOG("listening on %s", path);
-  return add_listener(fd);
+  return add_listener(fd, false);
 }
 
 bool server_init(const ServerConfig *cfg, LineHandler on_line) {
@@ -174,13 +179,19 @@ static void reap_clients(void) {
   Client **pp = &SV.clients;
   while (*pp) {
     Client *c = *pp;
-    if (c->dead || (c->closing && c->out.len == 0)) {
+    if (!c->held && (c->dead || (c->closing && c->out.len == 0))) {
       *pp = c->next;
       SV.nclients--;
       client_free(c);
     } else {
       pp = &c->next;
     }
+  }
+}
+
+static void update_interest(Client *c) {
+  if (!c->dead) {
+    epoll_mod(c->h.fd, (c->held ? 0 : EPOLLIN) | (c->want_out ? EPOLLOUT : 0), c);
   }
 }
 
@@ -200,7 +211,7 @@ static void client_flush(Client *c) {
   bool want = c->out.len > 0 && !c->dead;
   if (want != c->want_out) {
     c->want_out = want;
-    epoll_mod(c->h.fd, EPOLLIN | (want ? EPOLLOUT : 0), c);
+    update_interest(c);
   }
 }
 
@@ -225,21 +236,54 @@ void client_close_later(Client *c) {
   c->closing = true;
 }
 
-void server_event(const char *fmt, ...) {
+static void process_lines(Client *c);
+
+void client_hold(Client *c) {
+  if (c->held++ == 0) {
+    update_interest(c);
+  }
+}
+
+void client_release(Client *c) {
+  if (--c->held > 0) {
+    return;
+  }
+  update_interest(c);
+  if (!c->dead && !c->closing) {
+    process_lines(c);
+  }
+}
+
+bool client_alive(const Client *c) {
+  return !c->dead;
+}
+
+static void queue_event(bool dedup, const char *fmt, va_list ap) {
   StrBuf sb = { 0 };
   sb_puts(&sb, "! ");
-  va_list ap;
-  va_start(ap, fmt);
   sb_vprintf(&sb, fmt, ap);
-  va_end(ap);
   sb_puts(&sb, "\n");
-  for (size_t i = 0; i < SV.events.len; i++) {
+  for (size_t i = 0; dedup && i < SV.events.len; i++) {
     if (strcmp(SV.events.v[i], sb.data) == 0) {
       sb_free(&sb);
       return;
     }
   }
   strvec_push(&SV.events, sb.data);
+}
+
+void server_event(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  queue_event(true, fmt, ap);
+  va_end(ap);
+}
+
+void server_notify(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  queue_event(false, fmt, ap);
+  va_end(ap);
 }
 
 void server_flush_events(void) {
@@ -252,6 +296,14 @@ void server_flush_events(void) {
     }
   }
   strvec_free(&SV.events);
+}
+
+static void set_keepalive(int fd) {
+  int one = 1, idle = 15, intvl = 5, cnt = 3;
+  unsigned user_timeout = 30000;
+  if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one)) != 0 || setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) != 0 || setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl)) != 0 || setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt)) != 0 || setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout, sizeof(user_timeout)) != 0) {
+    LOG("keepalive: %s", strerror(errno));
+  }
 }
 
 static void accept_clients(Handle *l) {
@@ -270,6 +322,9 @@ static void accept_clients(Handle *l) {
       }
       close(fd);
       continue;
+    }
+    if (l->tcp) {
+      set_keepalive(fd);
     }
     Client *c = xcalloc(1, sizeof(*c));
     c->h.type = H_CLIENT;
@@ -290,7 +345,7 @@ static void accept_clients(Handle *l) {
 
 static void process_lines(Client *c) {
   size_t start = 0;
-  for (size_t i = 0; i < c->inlen && !c->closing && !c->dead; i++) {
+  for (size_t i = 0; i < c->inlen && !c->closing && !c->dead && !c->held; i++) {
     if (c->in[i] != '\n') {
       continue;
     }
@@ -316,7 +371,7 @@ static void process_lines(Client *c) {
   }
   memmove(c->in, c->in + start, c->inlen - start);
   c->inlen -= start;
-  if (c->inlen == SERVER_LINE_MAX) {
+  if (c->inlen == SERVER_LINE_MAX && !c->held) {
     c->discarding = true;
     c->inlen = 0;
   }
@@ -391,6 +446,7 @@ void server_stop(void) {
 void server_shutdown(void) {
   for (Client *c = SV.clients; c; c = c->next) {
     c->dead = true;
+    c->held = 0;
   }
   reap_clients();
   for (int i = 0; i < SV.nlisteners; i++) {

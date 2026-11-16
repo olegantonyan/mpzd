@@ -28,8 +28,12 @@ void server_shutdown(void);
 void client_send(Client *c, const char *data, size_t n);
 void client_set_watch(Client *c, bool on);
 void client_close_later(Client *c);
+void client_hold(Client *c);
+void client_release(Client *c);
+bool client_alive(const Client *c);
 
 void server_event(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void server_notify(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void server_flush_events(void);
 
 #endif

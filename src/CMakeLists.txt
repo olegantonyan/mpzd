@@ -7,6 +7,7 @@ pkg_check_modules(ALSA REQUIRED IMPORTED_TARGET alsa)
 add_library(mpzdcore STATIC
   app.c
   util/util.c
+  util/bg.c
   model/track.c
   model/model.c
   model/sort.c

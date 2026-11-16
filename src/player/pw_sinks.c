@@ -72,7 +72,7 @@ bool pw_sinks_list(OutputList *out) {
     return false;
   }
   struct pw_loop *loop = pw_main_loop_get_loop(c.loop);
-  struct pw_context *ctx = pw_context_new(loop, NULL, 0);
+  struct pw_context *ctx = pw_context_new(loop, pw_properties_new("support.dbus", "false", NULL), 0);
   struct pw_core *core = ctx ? pw_context_connect(ctx, NULL, 0) : NULL;
   if (core) {
     struct pw_registry *reg = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
